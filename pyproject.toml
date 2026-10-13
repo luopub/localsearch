@@ -1,0 +1,60 @@
+# ==============================================================================
+# LocalSearch — 项目定义
+# ==============================================================================
+# 现在这个文件描述的是【P0 可行性验证期】的形态，有两点是刻意的：
+#
+# 1. 不写 [build-system]、不写 [project.scripts]，并把 [tool.uv] package 显式设为 false。
+#    当前还没有 src/localsearch/，一旦声明了构建后端，uv sync 就会去构建一个不存在的
+#    包并失败。等 P1 把 src/ 建起来，这里要改成 hatchling + lsearch 入口点——那时这个
+#    文件才算真的"项目可安装"（功能点 F1-01，测试落点 tests/unit/test_package.py）。
+#
+# 2. 依赖全部不写版本号。计划 §7.4 规定"版本在 P0 验证后才锁"，锁的产物是同目录的
+#    uv.lock —— 它记录本次解析出的确切版本，入库，之后靠它复现。改依赖前先想清楚是
+#    改这里的约束、还是改锁文件。
+# ==============================================================================
+
+[project]
+name = "localsearch"
+version = "0.0.0"
+description = "本地离线全盘全文搜索：索引本机磁盘上的文档，用自然语言或关键词检索"
+requires-python = ">=3.12,<3.13"
+
+# 依赖来源：docs/DEVELOPMENT_PLAN.md §7.4。下面的分组只是给人看的，uv 不解析注释。
+dependencies = [
+    # 嵌入与推理链路（决策 D1、D9：sentence-transformers 与 ONNX int8 双跑对比后再定）
+    "torch",
+    "sentence-transformers",
+    "transformers",
+    "onnxruntime",
+    "numpy",
+
+    # 存储与检索（决策 D2：SQLite FTS5 + HNSW）
+    "faiss-cpu",
+    "jieba",
+    "charset-normalizer",
+
+    # CLI 与呈现（决策 D7）
+    "typer",
+    "rich",
+
+    # 提取器（决策 D4、D6：四类文件各自的解析库）
+    "PyMuPDF",
+    "python-docx",
+    "openpyxl",
+    "python-pptx",
+    "beautifulsoup4",
+    "lxml",
+    "extract-msg",
+    "pillow",
+]
+
+[dependency-groups]
+# pytest 来自 §7.4 之外的"命令面"（计划 §4.6 有 `uv run pytest`），属开发依赖。
+dev = [
+    "pytest",
+]
+
+[tool.uv]
+# 当前是"虚拟项目"：只往 venv 里装依赖，不试图把本项目本身装进去。
+# P1 把 src/localsearch/ 建好之后，这一行连同 [build-system] 一起改。
+package = false
