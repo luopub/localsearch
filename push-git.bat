@@ -4,7 +4,14 @@ setlocal EnableExtensions
 rem ============================================================================
 rem  push-git.bat - stage everything, commit, and push to both remotes
 rem ----------------------------------------------------------------------------
-rem  Run from the project root:      .\push-git.bat
+rem  Run from the project root.
+rem
+rem      push-git.bat                       ask for the commit message
+rem      push-git.bat "fix: the thing"      use this message, no prompt
+rem
+rem  Quote the message if it contains anything cmd treats as an operator
+rem  (& | < > ^). Everything after the script name is the message; there is no
+rem  -m flag to remember.
 rem
 rem  Remotes are created automatically if missing. If a remote already exists
 rem  but points somewhere else, this script only WARNS - it never rewrites your
@@ -73,18 +80,36 @@ goto :push
 :do_commit
 echo.
 echo === Commit ===
+
+rem Message from the command line first: "push-git.bat "fix: the thing"".
+rem
+rem It has to be a BARE "set MSG=%*", not "set "MSG=%*"". Wrapping %* in quotes
+rem too gives an argument that already carries its own quotes a second pair:
+rem     set "MSG="fix A & B""
+rem and cmd pairs those quotes wrongly, so the message is silently truncated
+rem and its tail is run as a command. Bare %* keeps exactly one level of
+rem quotes - the ones you typed - and those are what stop cmd treating & | < >
+rem in your message as operators.
+rem
+rem Consequence worth knowing: an UNQUOTED message containing & | < > is split
+rem by cmd before this script ever runs. Quote the message.
+set MSG=%*
+if defined MSG set "MSG=%MSG:"=%"
+if defined MSG goto :msg_ready
+
 echo Press Enter to use the default message.
 set "MSG="
 set /p "MSG=Commit message: "
+if defined MSG set "MSG=%MSG:"=%"
+if defined MSG goto :msg_ready
 
-if not defined MSG (
-    for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`) do set "MSG=chore: auto-commit %%t"
-)
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`) do set "MSG=chore: auto-commit %%t"
 if not defined MSG set "MSG=chore: auto-commit"
 
+:msg_ready
 rem Double quotes in the message would end the -m argument early. Strip them
 rem rather than let git see a mangled message. Everything else - ampersands,
-rem pipes, angle brackets - is safe because the argument is quoted.
+rem pipes, angle brackets - is safe because the argument below is quoted.
 set "MSG=%MSG:"=%"
 
 echo Committing as: "%MSG%"
@@ -103,15 +128,15 @@ git rev-parse --verify HEAD >nul 2>&1
 if errorlevel 1 goto :no_commits
 
 echo.
-echo --- pushing to %REMOTE_GITHUB%
-echo     %URL_GITHUB%
-git push -u %REMOTE_GITHUB% HEAD
-if errorlevel 1 set "PUSH_RC=1"
-
-echo.
 echo --- pushing to %REMOTE_GITEE%
 echo     %URL_GITEE%
 git push %REMOTE_GITEE% HEAD
+if errorlevel 1 set "PUSH_RC=1"
+
+echo.
+echo --- pushing to %REMOTE_GITHUB%
+echo     %URL_GITHUB%
+git push -u %REMOTE_GITHUB% HEAD
 if errorlevel 1 set "PUSH_RC=1"
 
 echo.

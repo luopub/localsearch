@@ -264,7 +264,7 @@ localsearch/
 ├─ .gitignore                  # 版本库排除（与 .lsearchignore 是两回事，见文件头说明）
 ├─ .gitattributes              # 钉死 run-index.cmd 的 CRLF（§4.8）
 ├─ .lsearchignore              # 索引排除规则（用户可改，单一来源，见 §4.5.1）
-├─ push-git.bat                # 手动发布：add + commit（消息可空）+ 推 GitHub/Gitee
+├─ push-git.bat                # 手动发布：add + commit + 推 GitHub/Gitee，消息可从命令行带入
 ├─ docs/
 │  ├─ DEVELOPMENT_PLAN.md      # 本文件：打算做什么
 │  └─ PROGRESS.md              # 开发与测试进度：实际发生了什么（见 §10）
