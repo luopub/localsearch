@@ -17,7 +17,15 @@
 本地离线全盘全文搜索：索引本机磁盘上的文档，用自然语言或关键词检索，命中定位到文件与片段。
 完全离线运行，CLI 优先，架构为将来的 GUI 与多模态预留接口。
 
-**当前状态：P0 可行性验证尚未开始。仓库内只有文档与配置，没有 `src/`、没有 `pyproject.toml`、没有可运行的东西。**
+**当前状态不写在这里。** 它属于 [docs/PROGRESS.md](docs/PROGRESS.md) §1（状态总览）与 §2（一句话现状）——同一个事实维护两份必然漂移，而下面「规范」一节自己就写着「同一件事只允许有一个真相来源」。
+**新会话请从下面的「接手顺序」开始。**
+
+## 接手顺序（新会话第一步）
+
+1. 读 [docs/PROGRESS.md](docs/PROGRESS.md)——**§2** 写了下一步的第一个具体动作，**§1** 是各阶段状态，**§3** 分清哪些已实测、哪些还是假设
+2. 读 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) 的 **§5**（分阶段与功能点切法）与 **§10**（记录、测试、提交推送的规则）
+3. 开工前确认三件事：**收到过明确的「开始」指令**；`git status` 工作区干净；两个远程的位置（§2 里记着谁落后谁）
+4. 不要凭本文件推断进度——**本文件只放行为约束，不放状态**
 
 ## 动手之前（最高优先级）
 
@@ -31,7 +39,7 @@
 
 | 层面 | 选型 |
 |---|---|
-| 语言 / 包管理 | Python 3.12（P0 不通过回退 3.11）；uv；`.venv` 在项目根 |
+| 语言 / 包管理 | Python **3.12**；uv；`.venv` 在项目根。**本机已经装了 3.12.12（uv 管理的独立解释器）——但裸命令 `python` 是 3.11.9、`py` 是 3.13.5，建 venv 时别用错，用错不会报错**（路径与实测见计划 §3.1）。回退 3.11 只在 P0 判定 py3.12 不可行时 |
 | CLI | Typer + rich；一次性命令 + 交互 REPL 双形态 |
 | 嵌入模型 | `google/embeddinggemma-2`；768 原生维 + int8 量化落盘 |
 | 推理链路 | sentence-transformers + PyTorch CPU（P0 与 ONNX int8 双跑实测后定） |
@@ -43,13 +51,13 @@
 
 | 路径 | 作用 |
 |---|---|
-| [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) | **打算做什么**：验收 A1–A9、决策 D1–D16、架构、分阶段计划、风险 R1–R20 |
+| [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) | **打算做什么**：验收 A1–A9、决策 D1–D12、架构、分阶段计划、风险 R1–R20 |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | **实际发生了什么**：实测数字、偏差、遗留。**与计划冲突时以此为准**，并回头修正计划 |
-| [docs/reports/](docs/reports/) | 长期报告与**不可重复**实测的原始输出（拔盘、断网、全盘试跑、计划任务真实触发）。命名 `<功能点ID>-<主题>.md` |
+| [docs/reports/](docs/reports/) | 长期报告与**不可重复**实测的原始输出（拔盘、断网、全盘试跑、计划任务真实触发）。命名 `<功能点ID>-<主题>.md`。**目录尚未创建**，第一份报告时建（git 不跟踪空目录） |
 | `.lsearchignore` | 索引排除规则的唯一来源，用户可改。`--include/--exclude` 只临时覆盖，不写回 |
-| `config/default.toml` | 配置模板（入库）；`config/config.toml` 含本机绝对路径，不入库 |
+| `config/default.toml` | 配置模板（入库）；`config/config.toml` 含本机绝对路径，不入库。**`config/` 目录尚未创建**，P1 落地 |
 | `scripts/windows/` | 计划任务定义与启动器。**注册与验证推迟到开发完成之后** |
-| `push-git.bat` | 手动发布：`git add` + `commit` + 推送 GitHub/Gitee |
+| `push-git.bat` | 手动发布：`git add` + `commit` + 推送 GitHub/Gitee。**只给人在终端前用**，见「命令」一节 |
 
 数据目录 `D:/localsearch-data/` 存放数据库、向量索引与日志，位于仓库之外、自动排除。
 **模型权重不在数据目录**，跟随系统 `HF_HOME`。
@@ -59,18 +67,13 @@
 现在真正存在的只有 git 与发布脚本：
 
 ```bash
-.\push-git.bat                 # 提示输入提交消息
+.\push-git.bat                 # 提示输入提交消息（人在终端前用）
 .\push-git.bat "fix: 某件事"    # 直接用该消息，不再提示
 ```
 
-以下命令面来自计划 §4.6，**P1 之后才存在，当前执行必然失败**：
+**⚠️ 由我（Claude）发起、或多行、或含引号的消息，一律走 `git commit -F <文件>` + 两条 `git push`，不要用 `push-git.bat` 传消息。** 这个项目**已经两次**因为 bash 把带引号的中文参数交给 `cmd.exe` 而损坏提交消息并推到了远程——它的失败模式是「看起来成功了，但内容是坏的」。完整规则见计划 §10.6。
 
-```bash
-uv run lsearch doctor | config | index [--tier 0|1|2] [--resume] [--prune] [--dry-run]
-uv run lsearch search "查询词" [--mode hybrid|lexical|semantic] [--json]
-uv run lsearch status | explain PATH | bench | reindex --stale
-uv run pytest
-```
+`uv run lsearch …` 那一整套命令面（`doctor` / `index` / `search` / `status` / `explain` / `bench` / `reindex` / `uv run pytest`）来自计划 §4.6，**P1 之后才存在，当前执行必然失败**。
 
 ## 规范
 
