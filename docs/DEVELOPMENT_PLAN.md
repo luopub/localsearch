@@ -262,6 +262,8 @@ uv run lsearch doctor        # 自检：依赖版本、模型、FTS5、磁盘、
 ```
 localsearch/
 ├─ pyproject.toml              # uv 管理，PEP 621
+├─ uv.lock                     # 依赖锁定：由它复现确切版本（§7.4）
+├─ .python-version             # 钉住解释器 3.12；本机裸 python 是 3.11.9，别用错（§3.1）
 ├─ README.md
 ├─ .gitignore                  # 版本库排除（与 .lsearchignore 是两回事，见文件头说明）
 ├─ .gitattributes              # 钉死 run-index.cmd 的 CRLF（§4.8）
@@ -773,6 +775,10 @@ lsearch                             # 无参数 = 进入交互模式（D7）
 ### 7.4 依赖清单（P0 验证后锁定版本）
 
 `torch`(CPU)、`sentence-transformers`、`transformers`、**`onnxruntime`**、`faiss-cpu`、`numpy`、`jieba`、`charset-normalizer`、`typer`、`rich`、`PyMuPDF`、`python-docx`、`openpyxl`、`python-pptx`、`beautifulsoup4`、`lxml`、`extract-msg`、`pillow`
+
+> **2026-10-14 05:04:34 状态**：上表 18 个包**已经装进本机 `.venv` 并解析进 `uv.lock`**（P0 前置基建，commit `da39db2`）。但**"锁定版本"这件事还没做完**，别把两者混起来看：这次只证明了"在 Windows + py3.12 上装得上、装出来是哪些版本"，**还没有证明它们在 P0 的真实用途里都工作**——D9 双跑、MFT 枚举、真实吞吐都还没跑。
+>
+> 因此 `pyproject.toml` 里的依赖现在**刻意不写版本号**，`uv.lock` 才是复现的依据。P0 之后若某些包要换版本，改 `pyproject.toml` 里的约束再 `uv lock`，**不要手改 `uv.lock`**（它是生成物，手改会在下次 `uv sync` 时被覆盖）。解析出的确切版本记在 [PROGRESS.md](PROGRESS.md) §3 的 E4。
 
 **仅在 P0 验证通过时才加入**（不通过则不引入，绝不成为 v1 的拦路依赖）：
 
