@@ -1,0 +1,116 @@
+<!--
+  结构与写法出处（2026-10 检索，网页正文抓取被网络策略拦截，以下取自搜索结果摘要）：
+  - 七模块骨架：项目上下文 / 技术栈 / 关键目录 / 命令 / 规范 / 工作流 / 防坑提醒
+    腾讯云《第 2 篇：从零搭建一份内容型知识库项目的 CLAUDE.md 实战编写》
+  - ALWAYS / NEVER / ASK FIRST 边界规则的写法：viktor-silakov/ai-ready 的 CLAUDE.md.template
+  - 长度纪律：约 50 行时遵循率约 94%，堆到 400 行降到约 71%
+    阿里云《CLAUDE.md 速通指南》；HackerNoon 同名文章建议控制在 200 行内
+  - HTML 注释在载入上下文前被剥离，所以本段不占预算
+
+  维护约定：本文件只放"行为约束"，即计划和进度文档都不适合承载的东西。
+  打算做什么 -> docs/DEVELOPMENT_PLAN.md；实际发生了什么 -> docs/PROGRESS.md。
+  新增一条之前先删一条，目标 < 150 行。
+-->
+
+# CLAUDE.md
+
+本地离线全盘全文搜索：索引本机磁盘上的文档，用自然语言或关键词检索，命中定位到文件与片段。
+完全离线运行，CLI 优先，架构为将来的 GUI 与多模态预留接口。
+
+**当前状态：P0 可行性验证尚未开始。仓库内只有文档与配置，没有 `src/`、没有 `pyproject.toml`、没有可运行的东西。**
+
+## 动手之前（最高优先级）
+
+- **未收到明确的「开始」指令，不创建代码文件、不安装依赖、不配置环境。**
+- **不替用户提交或推送。** 未经明确要求，不对远程仓库做任何写操作；`commit`、`push`、强推一律先问。改写已发布的提交尤其要先问。
+- **不确定就说不确定。** 未实测的数字、二手来源的结论必须标注来源与置信度。测过什么、没测过什么，分开说。
+
+## 技术栈
+
+| 层面 | 选型 |
+|---|---|
+| 语言 / 包管理 | Python 3.12（P0 不通过回退 3.11）；uv；`.venv` 在项目根 |
+| CLI | Typer + rich；一次性命令 + 交互 REPL 双形态 |
+| 嵌入模型 | `google/embeddinggemma-2`；768 原生维 + int8 量化落盘 |
+| 推理链路 | sentence-transformers + PyTorch CPU（P0 与 ONNX int8 双跑实测后定） |
+| 存储 | SQLite（WAL + FTS5）+ HNSW（FAISS 优先，hnswlib 备选） |
+| 中文检索 | jieba 预分词 + unicode61 |
+| 融合 | RRF (k=60)；v1 不做 cross-encoder 重排 |
+
+## 关键目录与真相来源
+
+| 路径 | 作用 |
+|---|---|
+| [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) | **打算做什么**：验收 A1–A9、决策 D1–D16、架构、分阶段计划、风险 R1–R20 |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | **实际发生了什么**：实测数字、偏差、遗留。**与计划冲突时以此为准**，并回头修正计划 |
+| `.lsearchignore` | 索引排除规则的唯一来源，用户可改。`--include/--exclude` 只临时覆盖，不写回 |
+| `config/default.toml` | 配置模板（入库）；`config/config.toml` 含本机绝对路径，不入库 |
+| `scripts/windows/` | 计划任务定义与启动器。**注册与验证推迟到开发完成之后** |
+| `push-git.bat` | 手动发布：`git add` + `commit` + 推送 GitHub/Gitee |
+
+数据目录 `D:/localsearch-data/` 存放数据库、向量索引与日志，位于仓库之外、自动排除。
+**模型权重不在数据目录**，跟随系统 `HF_HOME`。
+
+## 命令
+
+现在真正存在的只有 git 与发布脚本：
+
+```bash
+.\push-git.bat                 # 提示输入提交消息
+.\push-git.bat "fix: 某件事"    # 直接用该消息，不再提示
+```
+
+以下命令面来自计划 §4.6，**P1 之后才存在，当前执行必然失败**：
+
+```bash
+uv run lsearch doctor | config | index [--tier 0|1|2] [--resume] [--prune] [--dry-run]
+uv run lsearch search "查询词" [--mode hybrid|lexical|semantic] [--json]
+uv run lsearch status | explain PATH | bench | reindex --stale
+uv run pytest
+```
+
+## 规范
+
+- **同一件事只允许有一个真相来源。** 模型位置只认系统 `HF_HOME`，因此配置里**故意不提供**该项——改位置去改系统变量。
+- 文档与注释用中文（既有文档均如此）。
+- **`docs/PROGRESS.md` 只记三类信息**：实测数字、与预期的偏差、无法立刻解决的问题。「今天写了 scanner.py」这类流水账不写。
+- 分级就绪（Tier0 文件名 → Tier1 全文 → Tier2 语义）：搜索必须能在 Tier2 未完成时降级并**显式标注**「语义未就绪」，不允许静默返回不完整结果。
+- 单文件解析失败不得中断整轮索引，原因写入 `files.error_msg`。
+
+## 工作流
+
+| 时机 | 动作 |
+|---|---|
+| 每次测量 | **立刻**填进 `PROGRESS.md` §3，不要让数字只留在终端里 |
+| 每完成一个阶段 | 更新 §1 状态总览、填写该阶段小节、追加 §6 变更日志 |
+| 遇到意外 | 写进该阶段「与计划的偏差」。**只记成功等于没记** |
+| 决定变更 | 追加 §6，并回头改计划文档的对应条目 |
+| 阶段收尾 | 「与计划的偏差」「遗留」两栏**不允许留空**，没有就写「无」，逼自己确认过 |
+
+## 防坑提醒
+
+**Windows 批处理**（`scripts/windows/*.cmd`、`push-git.bat`；以下每一条都实际踩过）
+
+- 必须 **CRLF** 行尾 + **纯 ASCII**。cmd 按 OEM 代码页（本机 936）读文件，文件里出现非 ASCII 是可靠的破坏方式。
+- `rem` 行会吞掉**整行**，`&` `|` `<` `>` 都不被解释，注释里可以放心写这些字符。
+- 但**非 rem 行**里的字面 `%` 必须写成 `%%`，写单个 `%` 会被无声丢弃（`echo 100% off` → `100 off`）。**命令行手输时不需要加倍。**
+- `if (...)` 块内的 echo 文本若含未转义括号，会提前闭合该块，报「此时不应有 .」并指向错误的行号。
+- 调用另一个 `.cmd` 必须加 `call`，否则控制权不返回，其后的行永不执行。
+- 想让脚本「在别处空跑」必须**连 cwd 一起换**：`cmd.exe` 继承的是工作目录，不是脚本所在目录。把脚本复制到临时目录再运行**不能隔离**。
+
+**git / 发布**
+
+- `.gitattributes` 用 `* text=auto eol=lf` 钉死，唯一例外是 `*.cmd` / `*.bat` 保持 CRLF。`text=auto` 单独写不是「保持原样」，而是「启用转换」。
+
+**Hugging Face / 模型**
+
+- ⚠️ 以下关于模型规格与操作方式的说法**全部是二手信息，尚未在本机核实**（`PROGRESS.md` §3 的 M1–M3）。blog.google 与 huggingface.co 的正文抓取被网络策略拦截。按此实现前，先在 P0 用 `tools/bench_embed.py` 落实。
+- `HF_HOME` 用 `os.environ.setdefault()` 尊重系统既有值（本机已有 14GB 模型）。**绝不**设置 `SENTENCE_TRANSFORMERS_HOME`，它会造成第二份权重副本。
+- `HF_HUB_OFFLINE=1` 只约束索引/检索运行时；`tools/fetch_model.py` 需显式关闭它以完成首次下载。
+- 模型只接受 **bf16/fp32**；fp16 产出 NaN（M2，二手）。
+- 任务前缀必须非对称且写对（查询 `task: search result | query: {q}`；文档 `title: {t} | text: {c}`，无标题用 `title: none`，M3，二手）。**写错不会报错，只会静默降低召回**，所以 P0 要把前缀的正确性测出来，不能靠推理。
+
+**其他**
+
+- `.gitignore` 与 `.lsearchignore` 会给出相反答案（如 `*.log`：一个忽略、一个要索引）。这不是矛盾，两者目标不同，不要「顺手统一」。
+- `lsearch index --prune` 只在本次**真正可达**的卷内删条目，避免外接盘未挂载时清空其索引记录。
