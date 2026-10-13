@@ -192,3 +192,13 @@
   - `.gitignore` 刻意保持简短。它和 `.lsearchignore` 的规则会互相矛盾（例如 `*.log` 要进 git 忽略、却要进搜索索引），这不是错误，是两者目标不同——已在 `.gitignore` 文件头写明，避免将来有人"顺手统一"
   - **踩坑并修正**：`.gitattributes` 初版只写了 `* text=auto`，导致 `git add` 对每个文本文件报警告"LF will be replaced by CRLF"。原因是 `text=auto` 只把文件标记为"文本"，检出方向仍由 `core.eol` 决定，而它默认 `native` —— 在 Windows 上即 CRLF。本机 `core.autocrlf=false`，所以不加属性反而没有转换、也没有警告。改为 `* text=auto eol=lf` 显式钉死，才不受 `core.eol` / `core.autocrlf` 影响。教训：**`text=auto` 不是"保持原样"，是"启用转换"**
   - 该修正同时验证了 `run-index.cmd` 的保护有效：仓库内存 LF，检出为 CRLF，工作区实测仍是 CRLF
+- 新增 `push-git.bat`（项目根）：`git add .` → `git commit`（消息留空则用 `chore: auto-commit <时间戳>`）→ 依次推 `origin`(GitHub) 与 `gitee`(Gitee)。远程缺失时自动 `git remote add`；远程已存在但 URL 不符时**只告警、绝不改写**
+  - **未执行过真实推送**。验证全部在两个本地裸仓库替身上完成，没有触达 GitHub / Gitee，也没有改动本机 remote 配置
+  - **踩坑并修正**：初版加了 `chcp 65001`，理由是"否则中文提交消息会以 GBK 字节存进 git"。此判断**错误**，且当时"验证"它的实验也是错的：cmd 把变量存为 UTF-16 并以 UTF-16 传给子进程，控制台代码页不决定 git 收到什么；cp936 控制台输入的中文以 GBK 字节交给 cmd，仍能正确作为 UTF-8 到达 git。用**GBK 字节**管道输入复测（忠实模拟中文控制台），提交消息原样正确。已彻底删除 `chcp`
+  - 保留 `chcp` 的代价是实打实的：它会清空控制台输入缓冲区，导致 `push-git.bat < input.txt` 静默回退到默认消息。为一个不存在的收益付这个代价不划算。教训：**cp936 控制台输入乱码的错觉，多半来自你用 UTF-8 写的测试输入文件**——测编码前先确认输入文件本身的编码
+  - **踩坑并修正**：`echo --- origin  ->  https://...` 里的 `>` 被 cmd 当成重定向，该行文本被截断、输出被重定向到目录并报 `Access is denied.`，`---` 行整行消失。拆成两行不含特殊字符的 echo
+  - **踩坑并修正**：`if /i "%CUR_URL%"=="%2"` 永不成立。调用点传的是带引号的 `"url"`，`%2` 会连引号一起保留，于是每次运行都打印一条虚假 WARNING。改用 `%~2` 去引号后比较与显示
+  - 顺带补了一个防护：仓库尚无提交（unborn HEAD）时，`git push HEAD` 会报 `src refspec HEAD does not match any`，读起来像远程故障其实不是。改为提前 `git rev-parse --verify HEAD` 并明确提示
+  - 测试结果（`push-git.bat`，11 项全通过）：空输入→默认消息格式正确；消息含 `&`/`|`/`<`/`>` 原样保留（证明带引号的 `-m` 参数保护有效）；GBK 中文消息正确存储；无改动时跳过提交且提交数不变；零提交仓库给出明确错误；URL 不匹配时告警一次且不擅自改动 remote URL
+
+  > 修 `push-git.bat` 时踩的坑与 `run-index.cmd` 高度重合（OEM 代码页只能写 ASCII、`if (...)` 块内未转义括号、行尾必须 CRLF）。这几条已是本项目写 Windows 批处理的固定前提
