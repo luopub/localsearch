@@ -27,6 +27,13 @@ dependencies = [
     "transformers",
     "onnxruntime",
     "numpy",
+    # torchvision 不在计划 §7.4 的 18 包里，是 P0 实测补上的第 19 个（2026-10-14）。
+    # 不是我们直接用的库，是 transformers 的**传递必需项**：EmbeddingGemma 2 是多模态
+    # 模型，transformers 5.19 的 EmbeddingGemma2Processor 导入链里落了
+    #   processing_embedding_gemma2 → gemma4.image_processing_gemma4 → torchvision.transforms.v2
+    # 缺它就**连文本模型都加载不了**（AutoProcessor 无条件加载，没有"只要文本"的开关）。
+    # 只用它的 transforms，不碰它的模型，代价约 8MB。
+    "torchvision",
 
     # 存储与检索（决策 D2：SQLite FTS5 + HNSW）
     "faiss-cpu",
