@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LocalSearch - daily incremental index
+  ==========================================================================
+  Register with (run from an elevated prompt; /F overwrites an existing task):
+
+      schtasks /Create /TN "LocalSearch\DailyIncrementalIndex" ^
+               /XML "D:\work\test\localsearch\scripts\windows\localsearch-daily-index.xml" /F
+
+  Or, if schtasks rejects the file's encoding (it is picky about XML task
+  files), register it through PowerShell instead - this path has no file
+  encoding involved at all:
+
+      $x = Get-Content -Raw "D:\work\test\localsearch\scripts\windows\localsearch-daily-index.xml"
+      Register-ScheduledTask -TaskName "LocalSearch\DailyIncrementalIndex" -Xml $x -Force
+
+  Inspect / debug:
+
+      schtasks /Query  /TN "LocalSearch\DailyIncrementalIndex" /V /FO LIST
+      schtasks /Run    /TN "LocalSearch\DailyIncrementalIndex"
+      schtasks /End    /TN "LocalSearch\DailyIncrementalIndex"
+      schtasks /Delete /TN "LocalSearch\DailyIncrementalIndex" /F
+
+  Output is not captured by Task Scheduler. The launcher writes it to
+  D:\localsearch-data\logs\scheduled-index.log (rotated at 5 MiB, one
+  previous generation kept). Do not remove the launcher indirection -
+  see scripts/windows/run-index.cmd for what it does and why.
+
+  ASCII-only on purpose: schtasks.exe is unreliable with non-ASCII task XML
+  unless the file is UTF-16LE, and a file whose declared encoding disagrees
+  with its actual bytes is the kind of problem that only shows up later.
+  The reasoning behind each setting lives in docs/DEVELOPMENT_PLAN.md 4.8.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+
+  <RegistrationInfo>
+    <Author>luopu</Author>
+    <Description>LocalSearch daily incremental index. Scans the configured roots and updates the SQLite/FTS index and the vector index. Runs unattended; the first pass may take a long time.
+
+The arguments on the action, not the wrapper, decide how much work each run does:
+
+  index --prune
+      Incremental, all tiers. Correct once the index has caught up. On the
+      very first run this is effectively a continuous multi-day job. See
+      docs/DEVELOPMENT_PLAN.md section 4.8.
+
+  index --prune --tier 1
+      Gentle mode: filenames and full text only, no embedding. Bounded to
+      minutes and never pins the CPU for days, so search stays usable;
+      semantic results then appear only when you run a full 'lsearch index'
+      yourself.
+
+Do not add a second trigger while the first run is still catching up. See the MultipleInstancesPolicy comment in Settings.</Description>
+    <URI>\LocalSearch\DailyIncrementalIndex</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <CalendarTrigger>
+      <!-- 03:10 local. Deliberately not on the hour: Windows Automatic
+           Maintenance and most backup jobs cluster around 02:00-03:00, and
+           this job wants the disk to itself. -->
+      <StartBoundary>2026-10-15T03:10:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <!-- InteractiveToken: no password has to be stored, and the task
+           inherits the logged-on user's environment, which is where the
+           user-level HF_HOME lives. If you switch this to S4U or to
+           SYSTEM, verify with "lsearch doctor" that HF_HOME still resolves
+           to the existing model cache - otherwise the app falls back to
+           DATA_DIR\models\hf and re-downloads the weights. -->
+      <UserId>luopu</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <!-- LeastPrivilege: the scanner falls back to os.scandir, which needs
+           no elevation. Change to HighestAvailable to enable the MFT + USN
+           Journal backend (D11), roughly 40x faster enumeration and far
+           cheaper incremental runs. See docs/DEVELOPMENT_PLAN.md 4.8 for
+           the trade-off before flipping it. -->
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <!-- Critical. A first full pass can run for days; a second instance
+         starting at the next trigger would open the SQLite database and the
+         HNSW index concurrently with the writer. Skipping the new instance
+         is the correct behaviour, not a failure. -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+
+    <!-- Never start, and never keep running, on battery: a full embedding
+         pass pins every core. Flip both to false on a desktop, or on a
+         laptop you want to index while unplugged. -->
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+
+    <AllowHardTerminate>true</AllowHardTerminate>
+
+    <!-- Machine was off or asleep at 03:10 -> run at the next opportunity.
+         This is what makes a single trigger enough; no separate at-logon
+         trigger is needed. -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+
+    <!-- The whole point of the project is offline operation. -->
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+
+    <!-- No idle trigger: an idle condition is not a reason to start a job
+         that will occupy every core for hours. -->
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+
+    <!-- Do not wake the machine. StartWhenAvailable catches up instead;
+         waking a laptop to index it is a good way to drain its battery. -->
+    <WakeToRun>false</WakeToRun>
+
+    <!-- PT0S = no time limit. A full first pass legitimately exceeds the
+         72-hour default, and being killed mid-embedding is exactly what
+         IgnoreNew plus the resume flag exist to avoid. After the initial
+         catch-up, runs finish in minutes. -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+
+    <!-- Below normal (default is 5, higher number = lower priority). Keeps
+         the indexer from competing with whatever you are actually doing. -->
+    <Priority>7</Priority>
+
+    <!-- Retry only real failures. run-index.cmd maps "completed with
+         per-file errors" to exit 0 so this does not fire on a routine
+         unreadable file. -->
+    <RestartOnFailure>
+      <Interval>PT15M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <Command>D:\work\test\localsearch\scripts\windows\run-index.cmd</Command>
+      <!-- Argument alternatives are documented in RegistrationInfo /
+           Description above, because XML comments cannot contain two
+           consecutive hyphens and every lsearch flag starts with two. -->
+      <Arguments>index --prune</Arguments>
+      <WorkingDirectory>D:\work\test\localsearch</WorkingDirectory>
+    </Exec>
+  </Actions>
+
+</Task>

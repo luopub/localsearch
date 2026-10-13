@@ -1,0 +1,427 @@
+# ==============================================================================
+# LocalSearch 索引排除规则  (类 .gitignore 语法)
+# ==============================================================================
+# 作用：决定 lsearch 建索引时"跳过什么"，直接决定索引语料规模与首次索引耗时。
+#      —— 这可能是整个项目里对你最省钱的一个文件。
+#
+# 修改后不必重跑全量索引：`lsearch index --prune` 会剔除被新规则命中的已索引项。
+#
+# ------------------------------------------------------------------------------
+# 语法
+# ------------------------------------------------------------------------------
+#   # 注释              空行忽略
+#   name/               任何层级下名为 name 的【目录】及其全部内容
+#   *.ext               任何层级下匹配该通配模式的【文件】
+#   /doc/build/         相对路径（从某个扫描根目录算起）
+#   ^C:/Windows         绝对路径前缀（盘符写法，跨盘可用）
+#   **/                递归任意层级
+#   !pattern            例外：取消先前规则的排除（白名单）；后写的规则优先
+#                      注意：父目录被排除后，子项无法用 ! 单独救回，需先放开父目录
+#
+# ------------------------------------------------------------------------------
+# 分区（解析器按这两个标记切分，请不要改动这一行本身）
+# ------------------------------------------------------------------------------
+#   #@section skip       完全跳过：不进索引，连文件名都搜不到
+#   #@section name-only  仅记文件名与路径，不做正文提取与向量化
+#                        （用于大二进制/媒体/压缩包：你仍能"搜到它在哪"）
+# ------------------------------------------------------------------------------
+
+
+#@section skip
+
+# ---- 1. LocalSearch 自身（请勿删除：否则索引库会自我索引，形成反馈循环）----
+*.lsearch-tmp
+*.lsearch-shm
+*.lsearch-wal
+
+#@begin managed —— 自动生成，请勿手改（下次运行会被覆盖）
+# 内容 = config 里的 paths.data_dir + 项目自身的 .venv
+^D:/localsearch-data
+^D:/work/test/localsearch/.venv
+#@end managed
+#
+# 这一块为什么不能改成手写规则：
+# 1) 索引器在往 data_dir 里持续写文件（DB、向量索引、模型下载），纯靠规则匹配去
+#    排除它存在竞态——刚遍历过的目录里又新建了文件。所以 walker 层另有硬性剔除，
+#    这里只是让"它确实被排除了"这件事对你可见。
+# 2) 你以后改 data_dir 或挪动项目目录，不需要回来改这个文件，工具会自己重写本区块。
+
+# ---- 2. 版本控制与 IDE 元数据 ----
+.git/
+.svn/
+.hg/
+.bzr/
+.idea/
+.vs/
+.fleet/
+.history/
+# 注：.vscode/ 未排除——它是纯 JSON 文本且体积小，有时你想搜自己的配置。
+
+# ---- 3. 依赖目录（编程场景的绝对大头，删掉会显著变慢）----
+node_modules/
+bower_components/
+jspm_packages/
+.pnpm-store/
+.yarn/
+.npm/
+.venv/
+venv/
+virtualenv/
+env/
+site-packages/
+dist-packages/
+.eggs/
+vendor/
+.gradle/
+.m2/
+.ivy2/
+.sbt/
+.cargo/
+.rustup/
+.nuget/
+.pub-cache/
+.dart_tool/
+elm-stuff/
+Pods/
+Carthage/
+DerivedData/
+
+# ---- 4. 各类缓存（编译/测试/打包/框架）----
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.pyre/
+.pytype/
+coverage/
+htmlcov/
+.nyc_output/
+.sass-cache/
+.parcel-cache/
+.turbo/
+.webpack/
+.next/
+.nuxt/
+.svelte-kit/
+.angular/
+.serverless/
+.terraform/
+.stack-work/
+cmake-build-*/
+CMakeFiles/
+*.egg-info/
+
+# ---- 5. 通用临时/缓存目录 ----
+# ⚠️ 以下 4 条按目录名全局匹配，最可能误伤（比如你在某处有个叫 tmp 的正式资料夹）。
+#    如果你确实把工作文件放在这类目录里，请删掉对应行。
+Temp/
+tmp/
+cache/
+Cache/
+CrashDumps/
+minidump/
+Temporary Internet Files/
+INetCache/
+INetCookies/
+WER/
+Recovery/
+MSOCache/
+
+# ---- 6. 系统目录（绝对路径前缀，最大块的噪音来源）----
+^C:/Windows
+^C:/Program Files
+^C:/Program Files (x86)
+^C:/ProgramData
+^C:/$Recycle.Bin
+^C:/System Volume Information
+^C:/Recovery
+^C:/PerfLogs
+^C:/Windows.old
+^D:/$RECYCLE.BIN
+^E:/$RECYCLE.BIN
+^M:/$RECYCLE.BIN
+# 说明：^ 前缀规则按你实际有内容的盘符增删即可。
+
+# ---- 7. 系统文件与休眠/转储文件 ----
+pagefile.sys
+hiberfil.sys
+swapfile.sys
+DumpStack.log
+DumpStack.log.tmp
+NTUSER.DAT*
+UsrClass.dat*
+*.etl
+*.dmp
+*.mdmp
+*.wer
+*.evtx
+
+# ---- 8. Office / 编辑器的临时与备份文件（办公场景必留）----
+~$*
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.rej
+*.swp
+*.swo
+*.swn
+*~
+.~lock.*#
+Thumbs.db
+desktop.ini
+.DS_Store
+*.crdownload
+*.part
+*.partial
+*.download
+
+# ---- 9. 编译产物（编程场景）----
+# ⚠️ 以下 target/ build/ dist/ out/ bin/ obj/ 按目录名全局匹配，属"较激进"档：
+#    如果某个盘里有存放正式资料的 build / out / bin 目录，请删掉对应行。
+target/
+build/
+dist/
+out/
+bin/
+obj/
+Debug/
+Release/
+
+# ---- 10. 源码附带的编译中间产物 ----
+*.pyc
+*.pyo
+*.class
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.gcda
+*.gcno
+*.lo
+*.la
+*.deps
+*.ninja_deps
+*.ninja_log
+
+
+#@section name-only
+
+# ---- 11. 可执行文件与程序库（体积大且无正文；但你想"找到那个安装包"时仍可搜）----
+*.exe
+*.dll
+*.sys
+*.msi
+*.msix
+*.appx
+*.msu
+*.cab
+*.com
+*.scr
+*.ocx
+*.bin
+*.dat
+*.so
+*.dylib
+*.jar
+*.war
+*.ear
+*.nupkg
+*.whl
+*.apk
+*.ipa
+*.dmg
+*.deb
+*.rpm
+
+# ---- 12. 压缩包与镜像（内容无法解析，只留名字）----
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+*.tgz
+*.bz2
+*.xz
+*.zst
+*.lz
+*.lzma
+*.arj
+*.iso
+*.img
+*.vhd
+*.vhdx
+*.vmdk
+*.vdi
+*.qcow2
+*.wim
+*.esd
+
+# ---- 13. 媒体文件 ----
+# 内容向量化属于 v2 多模态阶段；v1 先保证"按文件名/路径/EXIF 能搜到"。
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+*.tif
+*.tiff
+*.heic
+*.heif
+*.avif
+*.ico
+*.raw
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.dng
+*.orf
+*.rw2
+*.psd
+*.psb
+*.ai
+*.eps
+*.indd
+*.sketch
+*.fig
+*.xd
+*.blend
+*.c4d
+*.3ds
+*.max
+*.stl
+*.obj3d
+*.fbx
+*.glb
+*.gltf
+*.mp3
+*.wav
+*.flac
+*.aac
+*.m4a
+*.ogg
+*.opus
+*.wma
+*.aiff
+*.ape
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+*.m4v
+*.mpg
+*.mpeg
+*.ts
+*.rmvb
+*.3gp
+# 注：*.svg 未排除——SVG 本质是 XML 文本，可正常提取正文，值得索引。
+
+# ---- 14. 字体 ----
+*.ttf
+*.ttc
+*.otf
+*.woff
+*.woff2
+*.eot
+*.fon
+
+# ---- 15. 数据库与邮件存储 ----
+# .db/.sqlite 无法从中提取出有意义的连续文本，故只留名字。
+# .pst/.ost 同上：v1 的邮件提取器只覆盖 .eml/.msg，PST 解析需额外库，列为 v1.1 候选。
+*.db
+*.db3
+*.sqlite
+*.sqlite3
+*.mdb
+*.accdb
+*.ldb
+*.frm
+*.ibd
+*.pst
+*.ost
+*.nsf
+*.dat2
+*.bak2
+
+# ---- 16. 旧版 Office 二进制格式（.doc/.xls/.ppt）----
+# v1 的提取器基于 python-docx / openpyxl / python-pptx，只能读 OOXML(.docx/.xlsx/.pptx)。
+# 旧格式需另配解析库，故先只索引文件名与路径，避免"看着像索引了其实没正文"。
+*.doc
+*.xls
+*.ppt
+*.dot
+*.xlt
+*.pot
+*.vsd
+*.vsdx
+
+# ---- 17. 快捷方式与链接 ----
+*.lnk
+*.url
+*.desktop
+
+
+# ==============================================================================
+# 可选规则（默认全部注释掉，按需取消注释）
+# ==============================================================================
+
+#@section skip
+
+# ---- 如果你希望索引更快，可以放弃索引日志正文 ----
+# 日志是可检索的高价值目标（"那个报错在哪个日志里"），默认保留。
+# 但全盘日志量可能极大。若你更看重索引速度，取消下面这行注释：
+# *.log
+# *.log.*
+
+# ---- AI 编程工具的会话缓存（体积不大，但内容杂）----
+# .claude/
+# .cursor/
+# .continue/
+# .aider.tags.cache*/
+
+# ---- OneDrive 冲突副本（命名不稳定，误伤风险高，默认不启用）----
+# *-DESKTOP-*
+# *的冲突副本*
+
+# ---- 若你想反向恢复某类文件（白名单例外）----
+# 示例：上面已排除所有 *.pdb，但我就是要索引这个目录下的调试符号文本清单
+# !/D:/work/proj/docs/
+
+# ---- 版本控制友好：自动读取各级 .gitignore（计划在 v1.1 实现）----
+# 实现后可在 config.toml 设 respect_gitignore = true，让已被 git 忽略的构建产物
+# 自动不建索引，省得在两个文件里重复维护规则。
+
+# ==============================================================================
+# 调试建议
+# ==============================================================================
+# 1) 别猜规则命中了什么，直接看：
+#      lsearch index --dry-run
+#    会按规则逐条打印"命中文件数"，据此增删规则，再跑真实索引。
+#
+# 2) 想确认某个具体文件为什么没被索引：
+#      lsearch explain "D:/work/some/file.log"
+#    会打印它被哪一条规则排除（或为何被跳过）。
+#
+# 3) 改了规则后：
+#      lsearch index --prune     # 剔除已索引但新规则不再允许的条目
+#      lsearch index             # 补索引新增允许的条目
+#
+#    注意 --prune 只在【本次运行真正可达的盘】内删除条目——某个盘没插、没挂载时
+#    不会把它已有的索引清空。删条目走的是内容引用计数：同一份内容被多个文件共享
+#    时（备份副本、改名后的同一文件），只有最后一个引用消失才真正删除。
+#
+# 4) 临时不想索引某个目录，又不想改这个文件：
+#    在该目录里放一个空文件 .lsearch-noindex 即可（借鉴 Recoll 的 nowalkfn）
+# ==============================================================================

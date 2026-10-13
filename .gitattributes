@@ -1,0 +1,40 @@
+# ==============================================================================
+# LocalSearch — 行尾与二进制处理
+# ==============================================================================
+# 这份文件主要为了保住一件事：scripts/windows/run-index.cmd 必须是 CRLF。
+#
+# 原因不是洁癖。cmd.exe 读取 LF 行尾的 .cmd 时，多行 if (...) 块的行为不稳定
+# ——块内的命令可能被跳过或整块解析失败。而这个脚本正是 Windows 计划任务每晚
+# 无人值守调用的入口，坏了没人会立刻发现。见 docs/DEVELOPMENT_PLAN.md §4.8。
+#
+# 本机 core.autocrlf=false，所以 git 不会自动转换；但只要有另一台机器或用
+# --global 以外的配置 clone 一次，行尾就可能被改写。用 .gitattributes 钉死，
+# 换取的是"这个前提不依赖每台机器的本地配置"。
+# ==============================================================================
+
+# 默认按内容自动判定是否为文本；文本在仓库内与工作区都统一用 LF。
+#
+# eol=lf 必须显式写出来，不能只写 text=auto。原因：
+#   text=auto 只是把文件标记为"文本"，检出的行尾仍由 core.eol 决定，而 core.eol
+#   默认是 native —— 在 Windows 上就是 CRLF。于是每次 git add 都会报
+#   "LF will be replaced by CRLF the next time Git touches it"。
+#   写成 eol=lf 则不受 core.eol 和 core.autocrlf 影响，任何机器上结果一致。
+* text=auto eol=lf
+
+# 唯一的例外：Windows 批处理必须是 CRLF（见文件头）。这两条写在 * 之后，
+# gitattributes 中后出现的规则覆盖先出现的。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 显式标为二进制，禁止任何行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.onnx binary
+*.faiss binary
+*.db binary
