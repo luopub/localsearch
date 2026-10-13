@@ -673,11 +673,22 @@ def _parallel_worker(payload: dict) -> dict:
             "rss": peak_rss(), "setup_s": time.perf_counter() - t_import}
 
 
-def parallel_sweep(base: dict, n_workers: list[int], facts: dict, force: bool) -> list[dict]:
+def parallel_sweep(base: dict, workers_wanted: list[int], facts: dict, force: bool,
+                   threads_override: int | None, cores: int,
+                   single: dict[tuple[str, str, int, int], float]) -> list[dict]:
     """按档位跑多进程。返回每个档位的结果，含被跳过的（跳过要说明理由）。
 
-    并行效率的分母是"同线程数的单进程"，不是"单线程"：workers×threads 才是真
-    吃掉的线程数，拿 1 线程当分母会把 SMT 的收益算成并行的功劳。
+    **每 worker 的线程数按 worker 数反推**（tpw = 物理核数 // workers），这是一处
+    刻意的修正。第一版把每 worker 的线程数固定成扫描出来的"最快单进程档位"，于是
+    8 个 worker 各开 8 条线程 = 64 条线程抢 8 个物理核，测出来的"加速比"只有 1.15×
+    ——那不是并行没用，是**问题没问对**：8 核的机器上，8 个 worker 的正确配法本来
+    就是每 worker 1 条线程。
+
+    并行效率的分母是"**同线程数**的单进程"（tpw 条线程、1 个进程），不是"最快档位"。
+    拿最快档位当分母会把线程级并行的功劳算进进程级并行里。
+
+    `single` 是单进程扫描已经量到的 (backend,dtype,threads,batch) → tok/s，能查到
+    就直接用，查不到才补测一次——免得再花一遍时间。
     """
     import multiprocessing as mp
 
@@ -685,8 +696,8 @@ def parallel_sweep(base: dict, n_workers: list[int], facts: dict, force: bool) -
     texts = base["texts"]
 
     # 先量单个 worker 的真实内存，再据此判断放不放得下。计划里的 workers=8 是
-    # 按 16 核算的，本机 8 物理核 15.4GB 内存 —— 内存很可能先撞墙。
-    probe_payload = dict(base, texts=texts[: min(len(texts), 8)], threads=base["threads"])
+    # 按 16 核算的，本机 8 物理核、内存又只剩几个 G —— 内存很可能先撞墙。
+    probe_payload = dict(base, texts=texts[: min(len(texts), 8)], threads=1)
     with mp.get_context("spawn").Pool(1) as pool:
         probe = pool.map(_parallel_worker, [probe_payload])[0]
     if not probe["ok"]:
@@ -699,21 +710,41 @@ def parallel_sweep(base: dict, n_workers: list[int], facts: dict, force: bool) -
           f"= 最多约 {int(facts['avail_ram'] / rss)} 个 worker 放得下")
 
     ctx = mp.get_context("spawn")
-    for w in n_workers:
+    for w in workers_wanted:
+        tpw = threads_override or max(1, cores // w)
+        total_threads = w * tpw
+
+        # 每个档位开跑前**重新读一次**可用内存：本机还有别的东西在跑，可用内存在
+        # 几分钟里能从 5GB 掉到 1GB。拿整轮开始时的那一个快照做判断，会在内存已经
+        # 被别人吃掉之后照样放行。
+        avail = machine_facts()["avail_ram"]
         need = rss * w
-        if need > facts["avail_ram"] * 0.9 and not force:
+        if need > avail * 0.9 and not force:
             print(f"\n  [SKIP] workers={w}：需要约 {human_bytes(need)}，"
-                  f"可用只有 {human_bytes(facts['avail_ram'])}。")
+                  f"此刻可用只有 {human_bytes(avail)}。")
             print(f"         跳过而不是硬跑——本机还有别的东西在用内存，跑崩会牵连它们。")
             print(f"         要强行跑：--force-parallel")
             out.append({"workers": w, "skipped": True, "need": need,
-                        "avail": facts["avail_ram"]})
+                        "avail": avail, "tpw": tpw})
             continue
 
+        # 单进程基线：同 backend、同 dtype、同线程数。扫描里量过就直接取。
+        key = (base["backend"], base.get("dtype", "—"), tpw, base["batch"])
+        baseline = single.get(key)
+        if baseline is None:
+            try:
+                baseline = _measure_one(base, tpw)
+                single[key] = baseline
+            except Exception as exc:  # noqa: BLE001
+                fail(f"并行基线 线程={tpw}", exc)
+                continue
+
         shelf = [texts[i::w] for i in range(w)]  # 交错切分：各 worker 负载更均衡
-        payloads = [dict(base, texts=shelf[i], threads=base["threads"]) for i in range(w)]
-        sub(f"并行 workers={w}，每 worker {base['threads']} 线程，"
-            f"合计 {w * base['threads']} 线程")
+        payloads = [dict(base, texts=shelf[i], threads=tpw) for i in range(w)]
+        sub(f"并行 workers={w} × 每 worker {tpw} 线程 = {total_threads} 线程"
+            f"（物理核 {cores}）")
+        if total_threads > cores:
+            print(f"  ⚠ 线程数 {total_threads} 超过物理核 {cores}，属于超订（靠 SMT 兜底）")
         t0 = time.perf_counter()
         try:
             with ctx.Pool(w) as pool:
@@ -734,16 +765,32 @@ def parallel_sweep(base: dict, n_workers: list[int], facts: dict, force: bool) -
         slow = max(r["seconds"] for r in res)
         useful = sum(r["useful"] for r in res)
         computed = sum(r["computed"] for r in res)
+        speedup = (useful / slow) / baseline if baseline else 0.0
         out.append({
-            "workers": w, "useful": useful, "computed": computed, "slowest_s": slow,
+            "workers": w, "tpw": tpw, "total_threads": total_threads,
+            "useful": useful, "computed": computed, "slowest_s": slow,
             "wall_s": wall, "rss": max(r["rss"] for r in res),
             "load_s": max(r["load_s"] for r in res),
+            "baseline": baseline, "speedup": speedup,
         })
+        print(f"  单进程基线（{tpw} 线程）: {baseline:.1f} tok/s")
         print(f"  最慢 worker 编码 {slow:.2f}s，墙钟 {wall:.2f}s（含各自加载模型）")
-        print(f"  合计有效 {useful:,} token → {useful / slow:8.1f} tok/s")
+        print(f"  合计有效 {useful:,} token → {useful / slow:8.1f} tok/s"
+              f"  加速 {speedup:.2f}×")
         print(f"  各 worker 峰值内存 最大 {human_bytes(max(r['rss'] for r in res))}"
               f"，合计约 {human_bytes(sum(r['rss'] for r in res))}")
     return out
+
+
+def _measure_one(base: dict, tpw: int) -> float:
+    """在子进程里补测一次单进程吞吐，只为拿并行段的分母。"""
+    import multiprocessing as mp
+
+    with mp.get_context("spawn").Pool(1) as pool:
+        r = pool.map(_parallel_worker, [dict(base, threads=tpw)])[0]
+    if not r["ok"]:
+        raise RuntimeError(r["error"])
+    return r["useful"] / r["seconds"]
 
 
 # ===========================================================================
@@ -781,7 +828,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "本次语料的 chunk 都在 512 以内，所以它只是安全网，不参与吞吐计算")
     p.add_argument("--parallel", action="store_true",
                    help="跑多进程并行段（A2 的 8 倍效率就在这里量）")
-    p.add_argument("--parallel-workers", default="2,4,8")
+    p.add_argument("--parallel-workers", default="1,2,4,8")
+    p.add_argument("--threads-per-worker", type=int, default=None,
+                   help="默认不设：每 worker 的线程数按 物理核数//workers 反推，"
+                        "使总线程数 ≈ 物理核数。手动指定会失去这个对齐，只在"
+                        "排查超订/欠订时才用")
     p.add_argument("--force-parallel", action="store_true",
                    help="内存不够也照跑（可能把本机拖垮，只在确认过的时候用）")
     return p.parse_args(argv)
@@ -983,29 +1034,36 @@ def main() -> int:
     if args.parallel and runs:
         section("第 6 步  多进程并行（A2：整机并行效率 ≥ 单进程的 8 倍）")
         best = max(runs, key=lambda r: r.useful_per_s)
-        print(f"  基线档位      : {best.backend} 批={best.batch} 线程={best.threads}"
+        print(f"  单进程最快档位: {best.backend} {best.dtype} 批={best.batch} 线程={best.threads}"
               f" → {best.useful_per_s:.1f} tok/s")
-        print(f"  并行用同一档位，每 worker {best.threads} 线程")
+        print(f"  并行段用它作为**后端与批量**，线程数按 worker 数反推（见 parallel_sweep 注释）")
         base = {"texts": texts,
-                "backend": best.backend, "threads": best.threads, "batch": best.batch,
+                "backend": best.backend, "batch": best.batch, "dtype": best.dtype,
                 "warmup": args.warmup, "model_id": args.model_id,
                 "st_dtype": best.dtype if best.backend == "ST" else args.st_dtype,
                 "repo_dir": onnx_dir, "model_file": onnx_file,
                 "prompt_name": args.prompt_name, "prefix": prefix, "dim": dim,
                 "max_seq": args.max_seq}
+        # 单进程扫描已经量过的档位直接复用，别在并行段再花一遍时间
+        single = {(r.backend, r.dtype, r.threads, r.batch): r.useful_per_s for r in runs}
         par = parallel_sweep(base, [int(x) for x in args.parallel_workers.split(",")],
-                             facts, args.force_parallel)
+                             facts, args.force_parallel,
+                             args.threads_per_worker, cores, single)
         good = [p for p in par if "useful" in p]
+        skipped = [p for p in par if p.get("skipped")]
         if good:
             print()
-            print(f"  并行效率（分母 = 上面那个单进程基线 {best.useful_per_s:.1f} tok/s）：")
+            print(f"  并行效率（分母 = **同线程数**的单进程，不是上面那个最快档位）：")
             for p in good:
-                sp = p["useful"] / p["slowest_s"] / best.useful_per_s
-                print(f"    workers={p['workers']:<3d} → {p['useful'] / p['slowest_s']:8.1f} tok/s"
-                      f"  加速 {sp:5.2f}×  {'✔ ≥8×' if sp >= 8 else ''}")
-            print(f"  注：加速比分母是同一线程数的单进程，所以它量的是**进程级**并行的收益。")
-            print(f"      8 物理核上要跑 8 个 worker，内存与 SMT 都会先于 CPU 见底——")
-            print(f"      这正是 A2 那句指标要小心读的地方。")
+                print(f"    workers={p['workers']:<3d} × {p['tpw']} 线程 → "
+                      f"{p['useful'] / p['slowest_s']:8.1f} tok/s"
+                      f"  加速 {p['speedup']:5.2f}×"
+                      f"  {'✔ ≥8×' if p['speedup'] >= 8 else '✘ <8×'}")
+            print(f"  注：8 物理核上要跑 8 个 worker，每 worker 只能分到 1 条线程；")
+            print(f"      再往上加 worker 只会抢同一批核，加速比必然往下走。")
+        if skipped:
+            print(f"  被跳过的档位：{', '.join('workers=' + str(p['workers']) for p in skipped)}"
+                  f"（内存不够，理由见上）")
 
     # ---- 结论 ------------------------------------------------------------
     section("结论")
