@@ -13,9 +13,17 @@
 
 ---- 用法（仓库根执行）-----------------------------------------------------
 
-    PYTHONIOENCODING=utf-8 uv run python tools/scan_report.py
-    PYTHONIOENCODING=utf-8 uv run python tools/scan_report.py D:/work
-    PYTHONIOENCODING=utf-8 uv run python tools/scan_report.py --json > 报告.json
+    uv run python tools/scan_report.py
+    uv run python tools/scan_report.py D:/work
+    uv run python tools/scan_report.py --json > 报告.json
+    PYTHONIOENCODING=utf-8 uv run python tools/scan_report.py     # 想要 UTF-8 时
+
+**不需要设 `PYTHONIOENCODING`**：输出只用 GBK（本机默认控制台的代码页 936）也认得
+的字符，直接跑得起来。⚠ **打印路径上不要引入 GBK 编不了的字符**——U+2212（减号）
+踩过一次（2026-10-15 01:24:49）：`print` 抛 `UnicodeEncodeError`，**整轮实测的输出
+一条都没留下**，包括那行之前已经打出来的账目。汉字、「」、`×`、`→`、`…` 都没问题，
+ASCII 的 `-` 也没问题。`tests/unit/test_scan_report.py` 在 gbk 与 utf-8 两种编码下
+各跑一遍这个脚本，专门防这件事复发。
 
 不给 roots 就用 `config/config.toml` 里 `[paths] roots` 的当前值。给了 roots 就
 **同时**用于构造 `IgnoreRules` 与 `ScanConfig`——两边不一致时扫描器会直接报错
@@ -143,10 +151,15 @@ def print_stats(stats: ScanStats) -> None:
     gib = stats.bytes_index / 1024**3
     print("\n账目")
     print(f"    根目录        {stats.roots_scanned} / {stats.roots_total} 可达")
+    # 「没扫的根」而不是「不可达」：`roots_unreachable` 从 F2-05 起也收被目录级标记
+    # 排除的根，把那种情形印成"不可达"是在报表里说错话。
     for raw, why in stats.roots_unreachable:
-        print(f"      不可达      {raw}：{why}")
+        print(f"      没扫        {raw}：{why}")
     print(f"    条目总数      {stats.entries_seen:,}（目录 {stats.dirs_seen:,} + 文件 {stats.files_seen:,}）")
-    print(f"    进入的目录    {stats.dirs_entered:,}（'看见的目录 − 剪掉的' + 根目录数）")
+    # 这里的减号必须是 ASCII 的 `-`：U+2212 是 GBK 编不了的字符，本机默认控制台
+    # （代码页 936）会直接抛 UnicodeEncodeError，把整轮实测的输出全吃掉——实测过
+    # 一次（2026-10-15 01:24:49），见 PROGRESS §4 P2 的 F2-05 那条。
+    print(f"    进入的目录    {stats.dirs_entered:,}（'看见的目录 - 剪掉的' + 根目录数）")
     print(f"    保留的目录    {stats.dirs_kept:,}（剪掉 {stats.dirs_pruned:,} / reparse {stats.dirs_reparse:,}）")
     print(f"    文件：正文    {stats.files_index:,}（{gib:.2f} GiB）")
     print(f"          仅名字  {stats.files_name_only:,}")
