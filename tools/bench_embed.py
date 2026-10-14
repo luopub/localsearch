@@ -371,6 +371,7 @@ class Run:
         self.useful = 0        # 含前缀、不含 padding
         self.computed = 0      # 含 padding，硬件真算的
         self.embeddings = None
+        self.rss = 0           # 本档位结束时进程的峰值常驻内存，用于算"能并行几个"
 
     @property
     def useful_per_s(self) -> float:
@@ -385,9 +386,10 @@ class Run:
         return self.computed / self.useful if self.useful else 0.0
 
     def line(self) -> str:
+        mem = f" {human_bytes(self.rss):>9s}" if self.rss else " " * 9 + " "
         return (f"  {self.backend:5s} {self.dtype:9s} 线程={self.threads:<3d} 批={self.batch:<3d} "
                 f"| 有效 {self.useful_per_s:8.1f} tok/s | 计算 {self.computed_per_s:8.1f} tok/s "
-                f"| padding×{self.padding_amp:4.2f} | {self.seconds:6.2f}s")
+                f"| padding×{self.padding_amp:4.2f} | {self.seconds:6.2f}s | RSS{mem}")
 
 
 # ===========================================================================
@@ -395,6 +397,15 @@ class Run:
 # ===========================================================================
 
 _ST_MODEL = None
+
+# 各档位末列的 RSS 是**进程峰值**（GetProcessMemoryInfo），不是"这一档单独占多少"。
+# 同一进程里各档位共用一份权重，峰值只增不减，所以它是个上界；要读单档真实占用，
+# 看每段第一行的值，或者只跑那一档。这个数直接决定"最多能并行几个 worker"，
+# 所以宁可把口径说清楚，也不要让人拿它当精确值用。
+RSS_NOTE = (
+    "    注：末列 RSS 是**进程峰值**，同一进程内只增不减——它是个上界，不是这一档\n"
+    "    的独占占用。要读单档真实占用，看本段第一行，或者单独只跑那一档。"
+)
 
 # 冷启动加载耗时按后端记一次。各档位复用同一个模型对象，所以后几次的 load_s
 # 都是 0，直接对 runs 取 max 会把冷启动成本显示成 0——那个数是要写进报告的
@@ -486,6 +497,7 @@ def run_st(texts: list[str], model_id: str, threads: int, batch: int,
     for i in range(0, len(texts), batch):
         emb = encode(texts[i:i + batch])
     run.seconds = time.perf_counter() - t0
+    run.rss = peak_rss()
     run.embeddings = emb
     return run
 
@@ -641,6 +653,7 @@ def run_onnx(texts: list[str], repo_dir: str, model_file: str, threads: int, bat
     for i in range(0, len(texts), batch):
         emb = encode(texts[i:i + batch])
     run.seconds = time.perf_counter() - t0
+    run.rss = peak_rss()
     run.embeddings = emb
     return run
 
@@ -955,6 +968,7 @@ def main() -> int:
         print(f"  维度          : {model.get_embedding_dimension()}")
         print(f"  similarity    : {model.similarity_fn_name}")
         print(f"  批 / 线程扫描 :")
+        print(RSS_NOTE)
         for b in batches:
             for t in threads:
                 try:
@@ -1012,6 +1026,7 @@ def main() -> int:
                 print(f"  → 这三个是图的**必需输入**（不是可选），只喂文本会直接报缺输入。")
                 print(f"    我们只跑文本，所以喂 0 长度的空张量。这是本模型多模态设计的直接后果：")
                 print(f"    文本塔与音视频塔共用一张图。")
+            print(RSS_NOTE)
         except Exception as exc:  # noqa: BLE001
             fail("ONNX 加载", exc)
         else:
