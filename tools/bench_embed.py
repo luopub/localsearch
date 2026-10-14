@@ -1015,6 +1015,12 @@ def main() -> int:
         print(f"  CPU 是 {cores} 核 Zen 2 —— **没有 bf16 硬件**，torch 只能软模拟。")
         print(f"  不传 dtype 直接构造 SentenceTransformer 就会掉进这个坑里，而且")
         print(f"  **不会报错**，只会慢。这是 P0 最该抓出来的那类问题。")
+        # 比值必须取**探针自己刚跑的这两条**，不能回头去 runs 里按条件搜。
+        # 主扫描里本来就已经有一条 float32/线程=8/批=16，`next()` 会先命中它，
+        # 于是比值变成"主扫描的 fp32"对"探针的 bf16"，混进了两轮之间约 8% 的
+        # 漂移（实测：571.1 与 527.2 是同一配置的两次测量）。**这种错会让结论
+        # 看起来更漂亮**（6.06× 而非 5.60×），因而更危险。
+        probe_runs: dict[str, Run] = {}
         for d in ("float32", "bfloat16"):
             # 两种 dtype 是两份独立权重。不先放掉前一份，探针期间就会同时按下两份
             # ST（本机实测峰值 6.54 GiB），而本机可用只有 4 GiB 出头——这一步紧挨着
@@ -1025,13 +1031,12 @@ def main() -> int:
                            cache=False, prompt_name=args.prompt_name,
                            max_seq=args.max_seq, dtype_name=d)
                 runs.append(r)
+                probe_runs[d] = r        # 留引用，比值必须用**探针自己刚跑的这两条**
                 print(r.line())
             except Exception as exc:  # noqa: BLE001
                 fail(f"ST dtype={d}", exc)
-        probe = [r for r in runs if r.backend == "ST" and r.threads == 8
-                 and r.batch == args.dtype_probe_batch]
-        f32 = next((r for r in probe if r.dtype == "float32"), None)
-        b16 = next((r for r in probe if r.dtype == "bfloat16"), None)
+        f32 = probe_runs.get("float32")
+        b16 = probe_runs.get("bfloat16")
         if f32 and b16 and b16.useful_per_s:
             print(f"  → float32 是 bfloat16 的 {f32.useful_per_s / b16.useful_per_s:.2f} 倍")
             print(f"  → 结论：本项目的 ST 后端**必须显式传 dtype=float32**（计划 §2.1 的")
