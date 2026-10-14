@@ -9,8 +9,11 @@
    这里用 `PYTHONIOENCODING=gbk` 起子进程，退出码必须是 0。
    （本机 `uv run` 不设 `PYTHONUTF8`，所以 GBK 就是默认值——这个测试跑的就是默认情形。）
 2. **`--json` 是记录用的，分桶必须对。** 报告要引用它，所以它得能被解析，且
-   「规则之外」的原因（目录级标记、reparse、`data_dir` 硬剔除、`max_file_mb` 超限）
+   「规则之外」的原因（reparse、`data_dir` 硬剔除、`max_file_mb` 超限）
    **不能**被记到某条规则头上——那会让 `--dry-run` 报出"某条规则排掉了 3 万条"。
+   ⚠ 目录级标记原本也在这一栏里，`F2-06` 起单独成栏（`目录标记`，`F2-05` 遗留第 8 条）：
+   分桶规则只有一份（`ingest/report.py`），所以改的是那一处，本文件的断言跟着改。
+   分桶本身的逐条判据在 `tests/unit/test_cli_index_dryrun.py` 里，这里只钉**脚本出口**。
 
 用真子进程而不是把 `main()` import 进来调：要测的正是"在终端里跑一条命令"这件事，
 而 `PYTHONIOENCODING` 只有子进程能干净地设。
@@ -72,10 +75,12 @@ def test_it_runs_under_the_console_encoding(tmp_path: Path, encoding: str) -> No
     assert "中文注释" not in proc.stdout  # 注释不是规则
 
 
-def test_json_puts_the_directory_marker_outside_the_rules(tmp_path: Path) -> None:
-    """标记剪掉的目录写进「规则之外」，`*.log` 写进「规则」并带行号。
+def test_json_puts_the_directory_marker_in_its_own_column(tmp_path: Path) -> None:
+    """标记剪掉的目录写进「目录标记」（单独一栏），`*.log` 写进「规则」并带行号。
 
-    这两栏的区别就是 `bucket()` 的全部意义：写错栏位，`--dry-run` 的数字就没法用。
+    栏位的区别就是 `bucket()` 的全部意义：写错栏位，报表的数字就没法用。
+    标记**不再**落在「规则之外」里（`F2-05` 遗留第 8 条），也不再与 reparse、
+    `data_dir` 硬剔除、`max_file_mb` 超限共用一个数字。
     """
     ignore = tree(tmp_path)
     proc = run_tool(str(tmp_path), "--ignore-file", str(ignore), "--json")
@@ -83,13 +88,14 @@ def test_json_puts_the_directory_marker_outside_the_rules(tmp_path: Path) -> Non
     payload = json.loads(proc.stdout)
 
     skipped = payload["skipped"]
-    # 「规则之外」那一栏里的原因会按 `OTHER_PREFIX` 截断（错误消息里带路径，不截断就
-    # 等于每条各成一组、等于没分组），所以这里按前缀认，不认整句。
-    marker_keys = [
-        k for k in skipped if k.startswith("规则之外|—|目录里有 .lsearch-noindex")
-    ]
+    # 标记这一栏只收 `base.marker_reason()` 那一句，所以键是**整句**，不再按前缀截断
+    # （按前缀截断是「规则之外」那一栏的事：那里的错误消息里带路径，见 OTHER_PREFIX）。
+    marker_keys = [k for k in skipped if k.startswith("目录标记|—|目录里有 .lsearch-noindex")]
     assert len(marker_keys) == 1, sorted(skipped)
     assert skipped[marker_keys[0]]["dirs"] == 1
+    assert not [k for k in skipped if k.startswith("规则之外|—|目录里有")], (
+        "标记又回到「规则之外」那一栏了：这正是 F2-05 遗留第 8 条要修掉的那件事"
+    )
 
     rule_key = f"规则|skip 第 2 行|*.log"
     assert rule_key in skipped, sorted(skipped)

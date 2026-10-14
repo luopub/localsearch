@@ -28,9 +28,10 @@ from localsearch.core import config as config_mod
 from localsearch.core.config import load_config
 from localsearch.core.logging import reset_logging
 
-#: 计划 §4.6 的命令面里，P1 还没实现的那些。
-#: 刻意**不含** `doctor`：它是 F1-05 的交付物，会有自己的测试文件去断言它存在。
-NOT_YET_IMPLEMENTED = ("index", "search", "status", "explain", "bench", "reindex")
+#: 计划 §4.6 的命令面里，还没实现的那些。
+#: 刻意**不含** `doctor`（F1-05 的交付物）与 `index`（F2-06 只实现了它的 `--dry-run`，
+#: 行为测试在 `test_cli_index_dryrun.py` 里；本文件只保留"它已被注册"这一条）。
+NOT_YET_IMPLEMENTED = ("search", "status", "explain", "bench", "reindex")
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +154,18 @@ def test_only_implemented_commands_are_registered() -> None:
             f"`{name}` 属于后面的阶段，现在挂上去只会让用户以为是它坏了——"
             "要么实现它，要么别注册"
         )
+
+
+def test_index_is_registered_even_though_only_dry_run_works() -> None:
+    """`index` 是"只注册真的能跑的命令"这一条的**半分例外**，判定标准写在这里。
+
+    它被挂上去是因为**命令自己会拒绝**：没有 `--dry-run` 时打印缺哪三块并退出码 2
+    （行为在 `test_cli_index_dryrun.py` 里逐条钉住），不会静默跑出一个看着正常的空结果。
+    所以这一条不是"它实现了"，而是"它不会误导人"——
+    这也意味着 `NOT_YET_IMPLEMENTED` 那张名单的判据不是"阶段到了没有"。
+    """
+    assert "index" in registered_names()
+    assert "index" not in NOT_YET_IMPLEMENTED
 
 
 @pytest.mark.parametrize("name", NOT_YET_IMPLEMENTED)
@@ -332,11 +345,28 @@ def test_read_only_commands_leave_no_trace(
 
 
 def test_log_file_is_exempt_exactly_for_read_only_commands() -> None:
-    """写入日志文件的那条判断，规则要能一眼看清是**哪些**命令被豁免。
+    """写入日志文件的那条判断，规则要能一眼看清是**哪些**命令被豁免、**为什么**。
 
     `doctor` 在 F1-05 落地时也应当在这一格里——它是只读诊断，同样不留落点。
+    `index` 在 F2-06 落地时进这一格，因为它那时只做只读的 `--dry-run`；**它的理由
+    栏里写着 P4 必须把它删掉**，这一条下面单独钉。
     """
     assert "config" in LOG_FILE_EXEMPT_COMMANDS
+    for name, why in LOG_FILE_EXEMPT_COMMANDS.items():
+        assert why.strip(), f"`{name}` 被豁免了日志，但没写原因——这张表最容易被顺手改错"
+
+
+def test_index_exemption_says_when_to_remove_it() -> None:
+    """`index` 的豁免是**暂时的**，且到期条件必须写在表里。
+
+    真正去索引的那天它要写日志，而"忘了把它从豁免表里删掉"的症状是
+    "任务跑过了但日志里什么都没有"——与"根本没跑"长得一样，属于最难查的一类。
+    把到期条件写进值里，是为了让改的人（很可能是几个月后的我）在读到这一行时
+    就知道该做什么，而不是去猜这张表当初为什么这么填。
+    """
+    why = LOG_FILE_EXEMPT_COMMANDS["index"]
+    assert "P4" in why, "到期条件不见了：写清楚哪一天必须把它删掉"
+    assert "dry-run" in why, "要说明它现在凭什么被豁免"
 
 
 # ==============================================================================
