@@ -1,0 +1,127 @@
+# ==============================================================================
+# LocalSearch 配置模板（入库）
+# ==============================================================================
+# 这个文件是**模板**，不是本机配置：
+#   config/default.toml   入库，所有机器的起点
+#   config/config.toml    本机配置，不入库，由 `lsearch config init` 生成
+# 两者都不存在时，程序用**代码里的默认值**跑，行为与模板一致。
+#
+# ⚠ 模板与代码默认值必须逐字段相等，由 tests/unit/test_config.py 里的一条测试盯着。
+#   改了这个文件就要同步改 src/localsearch/core/config.py 的 dataclass 默认值，
+#   反之亦然——测试会告诉你漏了哪一处。
+#
+# 未知的键会**报错**而不是被静默忽略：这个文件决定"什么文件会被索引"，
+# 一个拼错的键（mxa_file_mb）如果被忽略，症状是"规则没生效"而不是"报错"。
+# ==============================================================================
+
+[paths]
+# 索引库、向量、日志、临时文件的集中位置。它会被自动排除出索引（三重机制，
+# 见 .lsearchignore 的 managed 区块与计划 §4.5.1），不需要你手写规则。
+data_dir   = "D:/localsearch-data"
+# 白名单根目录。默认只有 D:/work —— 本机确认是本地盘的只有 C: 与 D:，
+# 计划 §4.5 模板里那个 M:/docs 在本机不存在，所以没有写进来。
+# 要加别的目录，直接往这个数组里追加，例如：["D:/work", "C:/Users/luopu/Documents"]
+roots      = ["D:/work"]
+# true 时忽略 roots，扫描全部"看起来是固定盘"的卷。
+# ⚠ 本机实测（PROGRESS.md §3 的 E10）：GetDriveType 判不出"本地性"——
+#    E: 报 DRIVE_FIXED(3) 且是 NTFS，与 C:/D: 读数完全一样，而它不是本地盘。
+#    所以打开这个开关前先确认你真的想索引所有盘。
+all_drives = false
+
+# 模型缓存位置**不在这里配置**，一律跟随系统 HF_HOME
+# （本机 = C:\Users\luopu\.cache\huggingface，已存 14GB 模型）。
+# 缺失时才兜底到 data_dir/models。不提供配置项是有意的——同一件事只许有一个
+# 真相来源，否则 config 与系统环境变量会打架，"哪边生效"将无从判断。
+# `lsearch doctor` 会打印实际生效值。
+
+
+[scan]
+# auto|scandir|mft（D11）。mft 需要管理员权限且限 NTFS，失败自动回退 scandir。
+# 实测：本机 MFT 比 scandir 快 5.68×（冷）/ 14.06×（暖），见 PROGRESS.md §3 的 M8。
+backend         = "auto"
+follow_symlinks = false
+# 超过这个大小只索引文件名与元数据，不提取正文。
+max_file_mb     = 64
+# 排除规则的唯一来源。--include/--exclude 只是临时覆盖，不写回这里，也不写回该文件。
+ignore_file     = ".lsearchignore"
+# v1.1 才实现：自动读取各级 .gitignore 作为补充规则。
+respect_gitignore = false
+# 内容去重（D12）：仅对 size 重复的文件算哈希，避免全盘读一遍。
+dedup_by_content  = true
+
+
+[extract]
+text_code = true
+office    = true                # PDF 走 PyMuPDF（D6）
+web_mail  = true
+media_meta = true               # 媒体只取文件名 + EXIF/ID3，不做内容向量化
+# .eml/.msg 里附件的递归深度
+email_attachment_depth = 1
+
+
+[chunk]
+target_tokens     = 512
+overlap_ratio     = 0.15
+# 超出只保留表头/统计摘要并标注"已截断"（D8）。
+# 单个超大表格造出上万切片能吃掉数小时索引时间，见 R12。
+max_chunks_per_doc = 200
+
+
+[embed]
+# auto|sentence_transformers|onnx。P0 双跑实测已定：ONNX int8（D9）。
+# 稳态快 14.7%，冷启动快 11.8 倍——后者对 `lsearch search` 这类一次性命令更要紧。
+backend     = "onnx"
+model_id    = "google/embeddinggemma-2"
+# 原生 768（D5）；可截断到 512/256/128（MRL），改动后需 `lsearch reindex --stale`。
+dim         = 768
+# ⚠ 严禁 float16（R6：fp16 产出 NaN）。可选值只有 float32 与 bfloat16，
+#   而本机是 Zen 2、没有 bf16 硬件，P0 实测 bfloat16 比 float32 慢 6.21 倍
+#   （71.4 对 442.9 tok/s），且**不报错、只是慢**。所以这里实际上只能是 float32。
+dtype       = "float32"
+# 向量落盘量化：none|int8
+quantize    = "int8"
+batch_size  = 16
+
+
+[index]
+vector_backend = "faiss"        # faiss | hnswlib（F0-05 实测两者在 Windows+py3.12 都可用）
+hnsw_m         = 32
+hnsw_ef_construction = 200
+hnsw_ef_search       = 64
+
+
+[tiers]
+# 分级就绪（D10）：`lsearch index --tier N` 跑到第 N 级为止，各级独立可用。
+# Tier0 建完即可按文件名搜；Tier2 未完成时搜索必须**显式标注**"语义未就绪"，
+# 不允许静默返回不完整结果（A8）。
+metadata = true                 # Tier0 文件名/路径：分钟级
+fulltext = true                 # Tier1 正文提取 + FTS：小时级
+semantic = true                 # Tier2 向量语义：天级
+
+
+[search]
+mode        = "hybrid"          # hybrid | lexical | semantic
+top_k       = 20
+rrf_k       = 60
+weight_lexical = 1.0
+weight_semantic = 1.0
+weight_path = 0.5
+
+
+[cli]
+language            = "zh"
+# 无参数运行 `lsearch` 时进入交互模式（D7）。REPL 本体在 P5 的 F5-07 落地，
+# 在此之前无参数运行只打印帮助。
+interactive_default = true
+
+
+[perf]
+# 并行嵌入的进程数。
+# 计划 §4.5 的模板写的是 8，那个数来自"cores//2"，而当时把 CPU 记成了 16 核。
+# P0 实测是 8 物理核 / 16 逻辑核（PROGRESS.md §3 的 E6），按物理核算
+# min(8, 8//2) = 4。本机真正卡住并行的还不是核数而是**内存**：单 worker 峰值
+# RSS 2.01 GiB，8 路要 16.09 GiB 而整机只有 15.37 GiB（A2 因此重定口径）。
+# 所以 4 是"按核数算出来、还没被内存否掉"的起点，不是承诺值。
+workers = 4
+# 每 N 个文件提交一次事务，让中断续跑有落点（A1）。
+commit_every_files = 500
