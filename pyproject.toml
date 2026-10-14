@@ -1,23 +1,28 @@
 # ==============================================================================
 # LocalSearch — 项目定义
 # ==============================================================================
-# 现在这个文件描述的是【P0 可行性验证期】的形态，有两点是刻意的：
+# 2026-10-14（P1 / F1-01）：本文件由 P0 的"虚拟项目"中间态改回**正式包**。
+# 中间态（不写 [build-system]、不写 [project.scripts]、[tool.uv] package = false）
+# 是因为当时还没有 src/localsearch/，一声明构建后端 uv sync 就会去构建一个不存在的
+# 包而失败。现在 src/ 已落地，那三处一起改回来。
 #
-# 1. 不写 [build-system]、不写 [project.scripts]，并把 [tool.uv] package 显式设为 false。
-#    当前还没有 src/localsearch/，一旦声明了构建后端，uv sync 就会去构建一个不存在的
-#    包并失败。等 P1 把 src/ 建起来，这里要改成 hatchling + lsearch 入口点——那时这个
-#    文件才算真的"项目可安装"（功能点 F1-01，测试落点 tests/unit/test_package.py）。
-#
-# 2. 依赖全部不写版本号。计划 §7.4 规定"版本在 P0 验证后才锁"，锁的产物是同目录的
-#    uv.lock —— 它记录本次解析出的确切版本，入库，之后靠它复现。改依赖前先想清楚是
-#    改这里的约束、还是改锁文件。
+# 依赖全部不写版本号。计划 §7.4 规定"版本在 P0 验证后才锁"，锁的产物是同目录的
+# uv.lock —— 它记录本次解析出的确切版本，入库，之后靠它复现。改依赖前先想清楚是
+# 改这里的约束、还是改锁文件（uv.lock 是生成物，手改会在下次 uv sync 时被覆盖）。
 # ==============================================================================
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "localsearch"
-version = "0.0.0"
 description = "本地离线全盘全文搜索：索引本机磁盘上的文档，用自然语言或关键词检索"
 requires-python = ">=3.12,<3.13"
+# 版本号不在本文件写死：唯一真相来源是 src/localsearch/__init__.py 的 __version__，
+# 由下面的 [tool.hatch.version] 读出来。两处各写一份是必然漂移的写法，
+# tests/unit/test_package.py::test_version_single_source 盯着这一点。
+dynamic = ["version"]
 
 # 依赖来源：docs/DEVELOPMENT_PLAN.md §7.4。下面的分组只是给人看的，uv 不解析注释。
 dependencies = [
@@ -55,13 +60,24 @@ dependencies = [
     "pillow",
 ]
 
+[project.scripts]
+# 命令名取 `lsearch`（计划 §7.1 第 2 条）。入口点在 F1-01 就存在，指向的函数在
+# F1-04 之前是"最小真入口"，不是占位声明——P1 的每个提交里 `lsearch` 都跑得起来。
+lsearch = "localsearch.cli.main:main"
+
 [dependency-groups]
 # pytest 来自 §7.4 之外的"命令面"（计划 §4.6 有 `uv run pytest`），属开发依赖。
 dev = [
     "pytest",
 ]
 
-[tool.uv]
-# 当前是"虚拟项目"：只往 venv 里装依赖，不试图把本项目本身装进去。
-# P1 把 src/localsearch/ 建好之后，这一行连同 [build-system] 一起改。
-package = false
+[tool.hatch.version]
+path = "src/localsearch/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/localsearch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 不设 addopts：测试命令原样写进 PROGRESS.md 的「测试记录」，多一层默认参数会让
+# 记录里的命令与真实行为对不上。
