@@ -472,7 +472,7 @@ CREATE VIRTUAL TABLE files_fts USING fts5(
 [paths]
 data_dir   = "D:/localsearch-data"     # 索引/向量/日志/临时文件集中于此；自动进入排除列表，见 §4.5.1
 roots      = ["D:/work", "M:/docs"]    # 白名单根目录
-all_drives = false                     # true 时忽略 roots，扫描全部固定盘
+all_drives = false                     # v1 不支持置 true（扫描器直接报错）：GetDriveType 判不出本地性，见 PROGRESS §3 E10
 # 模型缓存不在本文件配置：一律跟随系统 HF_HOME（本机 = C:\Users\luopu\.cache\huggingface），
 # 缺失时才兜底到 data_dir/models。不提供配置项是有意的——同一件事只许有一个真相来源，
 # 否则 config 与系统环境变量会打架，而"哪边生效"将无从判断。改位置请改系统变量。
