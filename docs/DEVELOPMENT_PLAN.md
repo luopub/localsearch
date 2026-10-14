@@ -163,7 +163,7 @@
 | uv 管理的解释器 | `%APPDATA%\uv\python`（`uv python dir`） | 与缓存**不是同一处**（早先这里写成 `%LOCALAPPDATA%\uv\`，已更正）；本机的 3.12.12 就在这里，见 §3.1 |
 | 数据库 + 向量索引 + 日志/临时文件 | `D:\localsearch-data\` | 单一目录，自动进入排除列表 |
 | 模型权重与 HF 缓存 | `C:\Users\luopu\.cache\huggingface` | **跟随系统已有的 `HF_HOME`，不覆盖**（见下文例外说明） |
-| 配置 | `%APPDATA%\localsearch\config.toml` | 由 `lsearch config init` 生成 |
+| 配置 | 项目内 `config\config.toml`（**已按 §7.2a 改，不是 `%APPDATA%`**） | 由 `lsearch config init` 从 `config\default.toml` 复制生成；`config.toml` 含本机绝对路径，**不入库** |
 
 数据目录内部结构：
 
