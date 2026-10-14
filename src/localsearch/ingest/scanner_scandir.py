@@ -332,9 +332,15 @@ class ScandirScanner:
         reason = decision.reason
         if action is Action.INDEX and stat.st_size > self.config.max_file_bytes:
             action = Action.NAME_ONLY
+            # 措辞的**顺序**是一条约束，不是修辞：`report.bucket` 拿理由的前
+            # `report.OTHER_PREFIX`（28）个字符给「规则之外」分组，所以**逐条会变的部分
+            # 必须排在第 28 个字符之后**。第一版把文件大小写在前面，一次真实全盘
+            # dry-run 里同一条理由裂成了 8 行、每行 1~8 个文件（2026-10-15 实测，
+            # 原始输出见 `docs/reports/F2-06-逐规则命中分布.md`）——那不是分组。
+            # 阈值在一次运行里是常量，留在前缀里；大小逐文件不同，压到最后。
             reason = (
                 f"超过 [scan] max_file_mb = {self.config.max_file_mb}"
-                f"（{stat.st_size / 1024 / 1024:.1f} MiB）：只记名字与元数据"
+                f"：只记名字与元数据（本文件 {stat.st_size / 1024 / 1024:.1f} MiB）"
             )
             stats.files_over_limit += 1
         if action is Action.INDEX:

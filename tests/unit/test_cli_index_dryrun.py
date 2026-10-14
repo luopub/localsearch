@@ -353,6 +353,67 @@ def test_the_max_file_mb_flag_overrides_the_config_value(
     assert "big.bin" in section
 
 
+def test_two_over_limit_files_land_in_a_single_row(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """同一条系统理由的 N 条记录必须落在**同一行**，且理由里的 `[scan]` 要印得出来。
+
+    两个坑各自都会**安静**地坏掉：
+
+    - `report.bucket` 拿理由的前 `OTHER_PREFIX`（28）个字符当归并键，所以理由里
+      **逐条会变的部分必须排在那之后**（对这条理由就是文件大小）。第一版把大小写进了
+      前缀，一次真实全盘 dry-run 里同一条理由裂成 8 行、每行 1~8 个文件
+      （2026-10-15 实测，原始输出见 `docs/reports/F2-06-逐规则命中分布.md`）——
+      看的人会以为那是 8 种不同的成因，而它其实是同一句话的 8 个数字；
+    - 理由原文里的 `[scan]` 是配置节的名字，rich 把方括号当样式标记**连词一起吃掉**，
+      终端上印成 `超过  max_file_mb = 64`（多一个空格、少一个词，同样不报错）。
+
+    两个文件大小不同才测得出：相同大小的话，即使大小排在分组前缀里也照样只出一行。
+    """
+    tree = sandbox["tree"]
+    (tree / "big2.bin").write_bytes(b"\0" * 2_500_000)  # 2.4 MiB，与 1.5 MiB 的 big.bin 不同
+
+    code, out, _ = run(sandbox, capsys, "index", "--dry-run", "--max-file-mb", "1")
+    assert code == 0
+    rows = [line for line in out.splitlines() if "max_file_mb" in line and "│" in line]
+    assert len(rows) == 1, (
+        "同一条超限理由裂成了多行——理由里会变的部分（文件大小）跑到分组前缀里去了。"
+        "要改的是 `scanner_scandir.py` 里那句话的**语序**，不是 `OTHER_PREFIX`：\n"
+        + "\n".join(rows)
+    )
+    row = row_containing(out, "max_file_mb")
+    assert re.match(r"^│\s*0\s*│\s*2\s*│", row), row  # 0 个目录 / 2 个文件，都在这一行
+    assert "[scan]" in row, f"理由里的 [scan] 被 rich 吃掉了：{row}"
+    # 行里印的是**分组前缀**，所以这句话的长度本身就是证据：前缀已经越过了阈值、
+    # 进到下一个分句（"：只记名字与元数据"），说明大小排在它后面。
+    assert "：只" in row, row
+
+
+def test_brackets_in_paths_and_patterns_survive_rich(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """方括号不是样式标记的专利：真实磁盘路径里有（`node_modules/[foo]` 这种）。
+
+    `rich` 对**认不出来的**方括号的处理是"连后面的文字一起吞掉"，不报错，所以
+    `_print_rows` 里三处从数据来的文本（归属、规则原文、例）都过 `escape()`。
+    这条同时钉两处：`规则` 那一列（glob 的字符组 `[.]` 是常见写法）与
+    `例` 那一列（路径里有方括号的目录）。
+
+    `*[.]xyz` 而不是 `*.xyz`：`fnmatch` 里 `[.]` 是"一个点"，两者匹配同一个东西，
+    但前者带方括号，才能测到转义。
+    """
+    tree = sandbox["tree"]
+    logs = tree / "logs[1]"
+    logs.mkdir()
+    (logs / "data.xyz").write_text("x", encoding="utf-8")
+
+    code, out, _ = run(sandbox, capsys, "index", "--dry-run", "--exclude", "*[.]xyz")
+    assert code == 0
+    row = row_containing(out, "[.]xyz")
+    assert "*[.]xyz" in row, f"规则原文里的方括号没印出来：{row}"
+    assert "logs[1]/data.xyz" in row, f"路径里的方括号把后面的文字吃掉了：{row}"
+
+
 # ==============================================================================
 # 3. 一条都没管到的规则
 # ==============================================================================

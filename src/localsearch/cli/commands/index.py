@@ -47,6 +47,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from localsearch.cli.state import CliState
@@ -232,6 +233,19 @@ def _dry_run(
 # ==============================================================================
 # 呈现
 # ==============================================================================
+#
+# **每一段动态文本都要过 `escape()`**：rich 把方括号当样式标记，**认不出就整段吃掉**，
+# 而且不报错。这不是理论风险，本项目已经撞了三次：
+#
+#   1. `--root` 帮助文本里裸写的 `[paths]`（`--help` 里那半句直接不见）；
+#   2. 目录名里带方括号的路径（`node_modules/[foo]` 这种在真实磁盘上很常见）；
+#   3. 扫描器自己造的理由 `超过 [scan] max_file_mb = 64`，在终端上印成
+#      `超过  max_file_mb = 64`（2026-10-15 实测，见 `docs/reports/F2-06-*.md`）。
+#
+# 前两次是"少半句话"，第三次是"理由看起来像另一个东西"。静态文案不 escape（本文件的
+# 那几个 `[bold]` 是自己写的），**凡是从数据里来的字符串一律 escape**——包括路径、
+# 操作系统错误消息、用户写的规则原文（glob 里 `[ch]` 这种字符组是常见写法）。
+# `tools/scan_report.py` 走 `print()`，不涉及这件事。
 
 
 def _mib(n: int) -> str:
@@ -249,9 +263,9 @@ def render(
     console: Console | None = None,
 ) -> None:
     console = console or Console()
-    console.print(f"扫描根        {'、'.join(roots)}")
-    label = f"（另有命令行临时规则：{extra_label}）" if extra_label else ""
-    console.print(f"排除规则      {ignore_file}（{rules_total} 条）{label}")
+    console.print(f"扫描根        {escape('、'.join(roots))}")
+    label = f"（另有命令行临时规则：{escape(extra_label)}）" if extra_label else ""
+    console.print(f"排除规则      {escape(str(ignore_file))}（{rules_total} 条）{label}")
     console.print(f"账目用时      {report.seconds:.2f} s（含回调，含 IO 等待）")
     _render_stats(report.stats, console)
     _render_distribution(report.dist, console, limit=limit)
@@ -278,10 +292,10 @@ def _render_stats(stats: ScanStats, console: Console) -> None:
     # 「没扫的根」而不是「不可达」：被目录级标记排除的根也进这个列表（标记可以放在
     # 扫描根上），把那种情形印成"不可达"是在报表里说错话。F2-05 定下的措辞。
     for raw, why in stats.roots_unreachable:
-        table.add_row("  没扫", f"{raw}：{why}")
+        table.add_row("  没扫", escape(f"{raw}：{why}"))
     table.add_row("读不到的", f"{stats.errors_total:,} 条（样本最多 {len(stats.errors)}）")
     for path, why in stats.errors:
-        table.add_row("  ", f"{path}：{why}")
+        table.add_row("  ", escape(f"{path}：{why}"))
     if stats.reparse_tags:
         tags = "  ".join(f"0x{tag:X}×{n}" for tag, n in sorted(stats.reparse_tags.items()))
         table.add_row("reparse tag", tags)
@@ -325,9 +339,9 @@ def _print_rows(
             f"{hits.dirs:,}",
             f"{hits.files:,}",
             _mib(hits.bytes),
-            where,
-            raw,
-            hits.example,
+            escape(where),
+            escape(raw),
+            escape(hits.example),
         )
     console.print(table)
     if len(rows) > limit:
@@ -353,6 +367,7 @@ def _render_unhit_rules(dist: Distribution, console: Console, *, limit: int) -> 
         " 两种成因在这里分不开）"
     )
     for rule in rules[:limit]:
-        console.print(f"  {rule.origin}")
+        # `origin` 里带规则原文，而 glob 里 `[ch]`、`[!x]` 是常见写法（见上面的段首注）。
+        console.print(f"  {escape(rule.origin)}")
     if len(rules) > limit:
         console.print(f"  …另有 {len(rules) - limit} 条")
