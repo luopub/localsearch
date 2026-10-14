@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import gc
 import os
 import platform
 import random
@@ -706,10 +707,35 @@ def parallel_sweep(base: dict, workers_wanted: list[int], facts: dict, force: bo
         return out
     rss = probe["rss"]
     print(f"  单 worker 峰值常驻内存: {human_bytes(rss)}")
-    print(f"  可用内存 {human_bytes(facts['avail_ram'])} ÷ 单 worker {human_bytes(rss)} "
-          f"= 最多约 {int(facts['avail_ram'] / rss)} 个 worker 放得下")
+    # 这里的上限必须用**当下**的可用内存算。用整轮开始时的快照会给出一个比实际
+    # 乐观得多的数字（本机实测：开头 4.95 GiB、跑完 ONNX 扫描后 6.90 GiB，
+    # 同一行文字相差 2 GiB），读者据此判断"放得下几个"会被误导。
+    avail_now = machine_facts()["avail_ram"]
+    print(f"  可用内存 {human_bytes(avail_now)} ÷ 单 worker {human_bytes(rss)} "
+          f"= 最多约 {int(avail_now / rss)} 个 worker 放得下")
+    print(f"  总物理内存 {human_bytes(machine_facts()['total_ram'])}："
+          f"计划 §3.1 设想的 workers=8 需要 {human_bytes(rss * 8)}，"
+          f"占整机 {rss * 8 / machine_facts()['total_ram'] * 100:.0f}%")
+    print(f"  ⚠ 并行段是本工具唯一会**同时按下多份模型**的地方。本机实测它两次把"
+          f"系统拖到无响应（2026-10-14），故默认只在余量充足时跑；要在别的机器上"
+          f"复现，先确认可用内存 > 单 worker × workers × 1.5。")
 
     ctx = mp.get_context("spawn")
+
+    # 放行一条并行档位要同时满足两件事，缺一不可：
+    #
+    #   1. 算上放大系数之后放得下。试跑只嵌 8 条文本，而真 worker 要嵌整条语料，
+    #      激活与临时缓冲都更多，所以按 1.3 倍估。
+    #   2. **跑完之后系统还剩得下**。这一条是本机用两次死机换来的：2026-10-14 的
+    #      实测里，workers=1 在"需要 2.01 GiB、可用 6.90 GiB"这种看上去很宽的
+    #      余量下，仍然把整台机器拖到无响应。本机只有 15.37 GiB，且同时跑着
+    #      浏览器/编辑器，可用内存是借来的。旧判据 `need > avail * 0.9` 在这里
+    #      会放行，等于赌运气。
+    #
+    # 保留额取物理内存的 25%，至少 4 GiB：留给 OS、页缓存和别的应用。
+    total = machine_facts()["total_ram"]
+    reserve = max(4 * 1024 ** 3, int(total * 0.25))
+
     for w in workers_wanted:
         tpw = threads_override or max(1, cores // w)
         total_threads = w * tpw
@@ -718,14 +744,17 @@ def parallel_sweep(base: dict, workers_wanted: list[int], facts: dict, force: bo
         # 几分钟里能从 5GB 掉到 1GB。拿整轮开始时的那一个快照做判断，会在内存已经
         # 被别人吃掉之后照样放行。
         avail = machine_facts()["avail_ram"]
-        need = rss * w
-        if need > avail * 0.9 and not force:
-            print(f"\n  [SKIP] workers={w}：需要约 {human_bytes(need)}，"
-                  f"此刻可用只有 {human_bytes(avail)}。")
+        need = int(rss * w * 1.3)
+        room = avail - reserve
+        if need > room and not force:
+            print(f"\n  [SKIP] workers={w}：需要约 {human_bytes(need)}"
+                  f"（单 worker {human_bytes(rss)} × {w} × 1.3），"
+                  f"而可用 {human_bytes(avail)} 扣掉保留额 {human_bytes(reserve)} "
+                  f"只剩 {human_bytes(max(0, room))}。")
             print(f"         跳过而不是硬跑——本机还有别的东西在用内存，跑崩会牵连它们。")
-            print(f"         要强行跑：--force-parallel")
+            print(f"         要强行跑：--force-parallel（后果自负，本机实测会死机）")
             out.append({"workers": w, "skipped": True, "need": need,
-                        "avail": avail, "tpw": tpw})
+                        "avail": avail, "reserve": reserve, "tpw": tpw})
             continue
 
         # 单进程基线：同 backend、同 dtype、同线程数。扫描里量过就直接取。
@@ -1033,6 +1062,21 @@ def main() -> int:
     par = []
     if args.parallel and runs:
         section("第 6 步  多进程并行（A2：整机并行效率 ≥ 单进程的 8 倍）")
+
+        # 测"还能放几个 worker"之前，必须先把父进程自己占的内存放掉。
+        # 父进程在前面几步加载过 ST fp32（约 3GB）与 ONNX 会话；留着不放，它们就
+        # 从"可用内存"里被扣掉，测出来的结论会变成"这台机器放不下 2 个 worker"，
+        # 而其实是**测量者自己**占的。这与"量网络要用将来真正发请求的那个客户端量"
+        # 是同一类错误：先把自己摆到正确的位置，再量。
+        global _ST_MODEL, _ONNX_SESS
+        _ST_MODEL = None
+        _ONNX_SESS = None
+        model = None      # main() 里的这两个局部名同样按着模型不放，一起断掉
+        sess = None
+        gc.collect()
+        freed = machine_facts()
+        print(f"  已释放父进程持有的模型；此刻可用内存 {human_bytes(freed['avail_ram'])}"
+              f"（整轮开始时 {human_bytes(facts['avail_ram'])}）")
         best = max(runs, key=lambda r: r.useful_per_s)
         print(f"  单进程最快档位: {best.backend} {best.dtype} 批={best.batch} 线程={best.threads}"
               f" → {best.useful_per_s:.1f} tok/s")
