@@ -392,6 +392,24 @@ class Run:
                 f"| padding×{self.padding_amp:4.2f} | {self.seconds:6.2f}s | RSS{mem}")
 
 
+class _LoadedRun:
+    """从磁盘读回来的 ST 侧向量，冒充一个 `Run` 供第 5 步比对用。
+
+    存在的理由见 main() 里 `--save-emb` 那段：本机必须把 ST 与 ONNX 拆成两次
+    进程跑，而第 5 步的比对要两边都有。比对代码只用到 dtype / threads / batch
+    三个标签和 embeddings，所以这里把标签从存盘时写的 meta 里还原出来，
+    **不必让比对代码为"向量是刚算的还是读回来的"分支**。
+    """
+
+    def __init__(self, meta: str, embeddings) -> None:
+        self.embeddings = embeddings
+        bits = meta.split("/")
+        self.dtype = bits[1] if len(bits) > 1 else "?"
+        kv = dict(p.split("=", 1) for p in bits[2:] if "=" in p)
+        self.threads = int(kv.get("线程", 0))
+        self.batch = int(kv.get("批", 0))
+
+
 # ===========================================================================
 # 后端一：sentence-transformers
 # ===========================================================================
@@ -453,7 +471,8 @@ def _st_load(model_id: str, cache: bool, dtype_name: str = "float32"):
     dtype 不是小事，本机的实测结论是反直觉的：
       模型 config 写的是 bfloat16，不传 dtype 就按 bf16 加载；而本机 CPU 是
       Zen 2（Ryzen 7 4800H），**没有 bf16 硬件支持**，torch 只能软模拟，
-      实测比 float32 慢约 4.5 倍。而且 bf16 下的归一化只做到 3 位有效数字，
+      实测比 float32 慢约 5.7 倍（三轮实测 5.60 / 5.74 / 6.06，取中间值；这个
+      比值本身有几 % 的轮间漂移，别当成精确常数）。而且 bf16 下的归一化只做到 3 位有效数字，
       出来的向量范数是 1.0017 而不是 1.0，跨后端比对会看到余弦 > 1。
     所以默认走 float32（计划 §2.1 的 M2 明确允许 bf16/fp32，禁的是 fp16）。
     """
@@ -891,7 +910,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    choices=["float32", "bfloat16", "float16", "default"],
                    help="ST 后端的权重精度。默认 float32——**不要改成 default**，"
                         "那会按模型 config 走 bfloat16，而本机 CPU 没有 bf16 硬件，"
-                        "实测慢约 4.5 倍。float16 明确禁止（M2：激活值 NaN）")
+                        "实测慢约 5.7 倍。float16 明确禁止（M2：激活值 NaN）")
     p.add_argument("--dtype-probe-batch", type=int, default=16,
                    help="第 3b 步 dtype 对比用的批量")
     p.add_argument("--max-seq", type=int, default=8192,
@@ -906,6 +925,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "排查超订/欠订时才用")
     p.add_argument("--force-parallel", action="store_true",
                    help="内存不够也照跑（可能把本机拖垮，只在确认过的时候用）")
+    # 把 ST 与 ONNX 拆成两次进程跑的桥梁。本机实测 `--backend both` 一个进程里
+    # 依次过完三份模型，峰值约 8 GiB，会段错误；拆开就没有这个峰。但第 5 步的
+    # 跨后端比对需要两边都在，于是让 ST 那次存盘、ONNX 那次读回。
+    # 用法：先 `--backend st --save-emb x.npz`，再 `--backend onnx --load-emb x.npz`。
+    p.add_argument("--save-emb", default=None, metavar="PATH",
+                   help="把 ST 侧向量存成 .npz，供另一次 --backend onnx 用 --load-emb 读回")
+    p.add_argument("--load-emb", default=None, metavar="PATH",
+                   help="读回 --save-emb 存的 ST 侧向量，使跨后端比对在拆进程后仍能做")
     return p.parse_args(argv)
 
 
@@ -1087,6 +1114,29 @@ def main() -> int:
     # ---- 第 5 步：两个后端的向量对不对得上 -------------------------------
     st_runs = [r for r in runs if r.backend == "ST" and r.embeddings is not None]
     on_runs = [r for r in runs if r.backend == "ONNX" and r.embeddings is not None]
+
+    # ST 侧向量落盘（可选）。为什么需要这个：本机实测这个进程在把三份模型
+    # （ST fp32 / ST bf16 / ONNX int8）都过一遍之后峰值约 8 GiB，而整机只有
+    # 15.37 GiB 且同时跑着别的程序，所以 `--backend both` 在本机会段错误。
+    # 把 ST 与 ONNX 拆成两次进程跑就没有这个峰，但第 5 步的比对需要两边都在。
+    # 于是让 ST 那次把向量存盘、ONNX 那次读回来——**检查本身不该因为"换了进程"
+    # 就做不了**，否则为了省内存就把"对比成立的前提"给丢了。
+    if args.save_emb and st_runs:
+        import numpy as np
+        a = np.asarray(st_runs[0].embeddings, dtype=np.float32)
+        np.savez(args.save_emb, st=a,
+                 meta=f"ST/{st_runs[0].dtype}/线程={st_runs[0].threads}/批={st_runs[0].batch}")
+        print(f"\n  [已存盘] ST 侧向量 {a.shape} → {args.save_emb}"
+              f"（供另一次 --backend onnx 用 --load-emb 读回做第 5 步比对）")
+    if args.load_emb and not st_runs:
+        import numpy as np
+        try:
+            z = np.load(args.load_emb)
+            st_runs = [_LoadedRun(str(z["meta"]), z["st"])]
+            print(f"\n  [已读回] ST 侧向量 {z['st'].shape} ← {args.load_emb}（{z['meta']}）")
+        except Exception as exc:  # noqa: BLE001
+            fail(f"读回 {args.load_emb}", exc)
+
     if st_runs and on_runs:
         section("第 5 步  跨后端一致性核对（速度对比成立的前提）")
         import numpy as np
