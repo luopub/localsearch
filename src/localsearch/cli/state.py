@@ -25,3 +25,10 @@ class CliState:
     config_file: Path | None
     #: 本次运行的日志落点（`doctor` / `config` 这类只读命令不写文件，此时 file_ok=False）
     log: LoggingSetup
+    #: **进程启动时**的环境变量快照，取自 `bootstrap_env` 之前。
+    #:
+    #: 必须存这一份：`bootstrap_env` 是往 `os.environ` 里真的写值的（`setdefault`），
+    #: 它跑完之后谁也没法从 `os.environ` 分辨"这个值是系统给的"还是"我们刚填的兜底值"。
+    #: 而 `doctor` 要报告的恰恰是这件事——它曾据此把 `TORCH_HOME` 报成"系统已设"，
+    #: 实际上系统里根本没这个变量，是我们自己刚写进去的。
+    env_at_start: dict[str, str]

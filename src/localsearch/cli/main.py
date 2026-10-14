@@ -27,6 +27,7 @@ r"""`lsearch` 命令行入口（P1 / `F1-04`）。测试落点 `tests/unit/test_
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +35,7 @@ import typer
 
 from localsearch import __version__
 from localsearch.cli.commands.config import config_app
+from localsearch.cli.commands.doctor import doctor
 from localsearch.cli.state import CliState
 from localsearch.core.config import (
     Config,
@@ -49,7 +51,7 @@ from localsearch.core.logging import setup_logging
 #: 理由是 A7 那条"不产生计划外持久化落点"：`doctor`、`config` 是只读诊断/管理命令，
 #: 不该为了回答"环境对不对"就在数据目录里留下目录和日志文件——那会让"检查过"这件事
 #: 本身改变被检查的对象。真要留下它们的输出，重定向终端即可。
-LOG_FILE_EXEMPT_COMMANDS = frozenset({"config"})
+LOG_FILE_EXEMPT_COMMANDS = frozenset({"config", "doctor"})
 
 #: 用了但没有给出子命令时的退出码。2 是"用法不对"的惯例值（与 Click 对用法错误的取值一致）。
 USAGE_EXIT_CODE = 2
@@ -68,6 +70,9 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(config_app, name="config")
+# 单个命令直接挂，不套一层子应用：套了就会变成 `lsearch doctor run`，
+# 而计划 §4.6 的命令面写的是 `lsearch doctor`。
+app.command("doctor")(doctor)
 
 
 @app.callback()
@@ -109,6 +114,10 @@ def root(
         typer.secho(f"配置有误：{exc}", fg="red", err=True)
         raise typer.Exit(2) from exc
 
+    # 快照必须在 bootstrap_env **之前**拍：它之后我们就分不清哪个值是系统给的、
+    # 哪个是自己刚填的兜底值了（见 cli/state.py 的 env_at_start）
+    env_at_start = dict(os.environ)
+
     # 见文件头第 2 条：必须在任何 torch / transformers 导入之前
     bootstrap_env(config.data_dir_path)
 
@@ -127,7 +136,9 @@ def root(
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(2) from exc
 
-    ctx.obj = CliState(config=config, config_file=config_file, log=log)
+    ctx.obj = CliState(
+        config=config, config_file=config_file, log=log, env_at_start=env_at_start
+    )
 
 
 def _load(config_path: Path | None) -> tuple[Config, Path | None]:
