@@ -367,7 +367,7 @@ CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 -- 同一份内容的多个副本（不同路径、备份、改名）共享同一行。
 CREATE TABLE blobs (
   id           INTEGER PRIMARY KEY,
-  content_hash TEXT NOT NULL UNIQUE,      -- 全文 blake2b；仅对 size 重复的文件计算（§4.4.1）
+  content_hash TEXT NOT NULL UNIQUE,      -- 全文 sha256；仅对 size 重复的文件计算（§4.4.1）
   size_bytes   INTEGER NOT NULL,
   extractor    TEXT,                      -- 提取器名
   parser_ver   TEXT,                      -- 提取器版本，参与缓存键，防止旧解析结果被复用
@@ -384,7 +384,7 @@ CREATE TABLE files (
   mime         TEXT,
   size_bytes   INTEGER NOT NULL,
   mtime_ns     INTEGER NOT NULL,
-  quick_sig    TEXT,                      -- 首尾各 4KB 的 blake2b，用于判断"是否变了"
+  quick_sig    TEXT,                      -- 尺寸 + mtime + ctime 的摘要，带配方号前缀 "stat:1:"，用于判断"是否变了"
   content_hash TEXT,                      -- 与 blobs.content_hash 对应；未提取时为 NULL
   blob_id      INTEGER REFERENCES blobs(id),
   frn          INTEGER,                   -- NTFS 文件记录号（MFT 后端填）：改名后仍可识别
@@ -446,8 +446,14 @@ CREATE VIRTUAL TABLE files_fts USING fts5(
 
 去重的收益在 6TB 盘上很实在，但朴素实现会带来两个真问题，方案如下：
 
-**问题一：给全盘算 BLAKE3 本身就要读一遍所有字节。**
-用 fdupes 那套经典技巧——**先按 `size_bytes` 分组，只对"存在同尺寸兄弟"的文件算内容哈希**。全盘里尺寸唯一的文件占了绝大多数，它们根本不需要读。这一步把去重的 I/O 成本降到接近零，同时仍然能抓住备份副本这种主要目标。
+**问题一：给全盘算内容哈希本身就要读一遍所有字节。**
+用 fdupes 那套经典技巧——**先按 `size_bytes` 分组，只对"存在同尺寸兄弟"的文件算内容哈希**。尺寸唯一的文件根本不需要读。这一步把去重的 I/O 成本降下来，同时仍然能抓住备份副本这种主要目标。
+
+> ⚠ **2026-10-15 按 `F2-04` 的实测改写**（数字在 PROGRESS §3 的 E18–E20，成立条件与缺口的完整清单在 §4 P2「遗留」第 9–12 条）。原文有三处与新数字不符，过程记在同一阶段的「偏差」第 11 条：
+> - **算法不是 BLAKE3，改用 stdlib `sha256`**。理由是依赖：BLAKE3 不在下面 §7.4 的 19 个包里，而 `hashlib.blake2b` 是**没有 SIMD 的老实现、不是 BLAKE3**，实测比 `sha256` 慢一倍（E18）。
+> - **"全盘里尺寸唯一的文件占了绝大多数"在代码树上恰好相反**：`D:/work` 上 **96.5% 的条数**有同尺寸兄弟，预筛只砍掉 **3.5% 的条数**。**同一个数字按字节看结论又反过来**——省掉 **75.0%** 的字节（72.38 → 18.11 GiB）。两句话都不假，差在量纲：**收益要按字节算**（E20）。
+> - **"把 I/O 成本降到接近零"不成立，预筛动不了大头**。真跑 94 万个小文件实测 **7 MiB/s、每文件 2.87 ms**，而大文件吞吐是 950 MiB/s——**差 135 倍**（E19），所以**"换个更快的哈希算法"在真实负载上不是杠杆**（建哈希器只要 1 微秒；大头是"读 9.2 KiB 的字节"，小文件读速只有 22–24 MiB/s）。预筛的**字节**收益仍然成立，但**折成多少秒说不出准数**：被跳过的那 34,040 个文件（平均 1.68 MiB）的读速没测，按已知的两头算分别是约 28 s 与约 39 分钟（「遗留」第 9 条）。
+> - **真去重的收益量到了**：`D:/work` 上冗余 **9.63 GiB = 13.3%**（E20；本计划原文估 10–30%，落在下沿）。⚠ **这是代码树的分布，6TB 备份盘没测过，不要外推**（「遗留」第 12 条）。
 
 **问题二：删文件时不能把共享内容一起删掉。**
 引用计数。`files.blob_id` 是多对一，删除文件只减引用；当 `SELECT COUNT(*) FROM files WHERE blob_id=?` 归零时，才删 blob 及其 chunks、FTS 行，并标记对应 HNSW label 为 tombstone。`--prune` 必须走这条计数路径，不能直接按 path 删。
@@ -719,7 +725,7 @@ lsearch                             # 无参数 = 进入交互模式（D7）
 |---|---|---|---|---|
 | **P0** 可行性验证 ✅ **2026-10-14 收尾（6 / 6）** | 把所有"待验证"变成已知事实，**核心是测出本机真实嵌入吞吐** | `tools/bench_embed.py`；**ST 与 ONNX int8 双跑对比报告**（D9 结论）；本机 tokens/s 实测；MFT 枚举在本机的可行性与权限验证（D11）；FAISS/hnswlib 在 Windows+py3.12 的可用性；FTS5 + jieba 可用性 | 用**你自己的真实文档**跑出可替换 §3.2 估算的实际数字 ⚠ **这一栏没有被字面满足**：实际用的是脚本内**确定性合成语料**（种子 20261014），不是用户盘上的真实文档；§3.2 的估算确已被实测吞吐替换，"语料代表性"这一层未验。见 [PROGRESS.md](PROGRESS.md) §4 P0「遗留」第 11 条 | 1–1.5 天（**实际约 16 小时**，同日 02:32 计划定稿 → 18:15 收尾） |
 | **P1** 骨架 | 项目可安装、可运行、可配置 | pyproject/uv 环境、config 加载与校验、日志、CLI 壳、`lsearch doctor` | `uv run lsearch doctor` 全绿 | 0.5 天 |
-| **P2** 扫描、指纹与去重 | 能安全遍历、识别变更、识别重复 | 双扫描后端（scandir + MFT）、`.lsearchignore` 解析与两层分区、指纹与 size 预筛去重、`.lsearch-noindex`、`--dry-run` 按规则统计 | 对 D:/work 试跑输出**每条规则的命中分布**；核对 MFT 与 scandir 结果完全一致 | 1.5–2 天 |
+| **P2** 扫描、指纹与去重 | 能安全遍历、识别变更、识别重复 | 双扫描后端（scandir + MFT）、`.lsearchignore` 解析与两层分区、指纹与 size 预筛去重、`.lsearch-noindex`、`--dry-run` 按规则统计 | 对 D:/work 试跑输出**每条规则的命中分布**；核对 MFT 与 scandir 结果——**判据已改（2026-10-14）：按 FRN 折叠硬链接后的集合相等**，不是"计数完全一致"（硬链接让两者在计数上永远不可能相等，见 §2 的 D11 注 (c) 与 PROGRESS §2 前提 (b)） | 1.5–2 天 |
 | **P3** 提取与分块 | 四类文件都能出正文 | 四类提取器（PDF 走 PyMuPDF）+ 分块器（含 200 片上限与截断标注）+ fixtures | 每种格式的最小样本单测；损坏文件不中断（A6） | 1.5–2 天 |
 | **P4** Tier0 + Tier1 落地 | **先让工具真的能用** | `files_fts` 建库（路径/名称检索）、正文 FTS 写入、tier 状态推进、分阶段提交 | 全盘跑完 Tier0 后**立刻能按文件名搜到**（A8）；中断续跑 | 1.5–2 天 |
 | **P5** Tier2 向量与混合检索 | 语义索引 + 融合 + 交互 | 嵌入器双后端、多进程调度、`embed_cache`、HNSW 构建、RRF 融合、片段高亮、REPL | 2 万文件基准集（A1）；去重生效（A9）；20 条评测（A4）；延迟实测（A3） | 2.5–3 天 |
