@@ -39,11 +39,12 @@ C: 盘实测 **347 万条目**（`PROGRESS.md` §3 的 E11）。攒成一个列�
 成"文件都删了"的索引（`R14` 的 `--prune` 同理）。总线类型（`BusType`）是本机唯一
 测过的替代判据，但它**没有在非本地卷上验证过**（见 `PROGRESS.md` §3 的 E13）。
 
----- `F2-05` 会接进来的一件事 --------------------------------------------------
+---- 目录级标记 `.lsearch-noindex`（`F2-05`） ----------------------------------
 
-`.lsearch-noindex` 标记（`F2-05`）要在**进入目录时**生效，落点就在本模块的目录循环
-里。`F2-01` 先不含它，`F2-05` 接上后 `F2-01` 的测试必须重跑（见 `PROGRESS.md` §5.2
-表后的注）。
+判定落在本模块的目录循环里，**在 `rules.decide()` 之前**，两份逻辑都在这里：
+`has_noindex_marker()` 问文件系统，`marker_reason()` 给跳过的那条一个不参与规则
+归因的理由。语义（为什么不可被 `!` 救回、为什么必须在**下潜之前**判）写在
+`filters.py` 的第九条，本模块只负责把它接到 `scandir` 的顺序上。
 """
 
 from __future__ import annotations
@@ -53,7 +54,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
-from localsearch.ingest.filters import Action, Decision, IgnoreRules, normalize
+from localsearch.ingest.filters import (
+    NOINDEX_MARKER,
+    Action,
+    Decision,
+    IgnoreRules,
+    normalize,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - 只为类型标注，运行时不需要 core
     from localsearch.core.config import Config
@@ -129,11 +136,18 @@ class ScanStats:
     ⚠ **`dirs_entered` 比 `dirs_seen` 多**，差额是**扫描根本身**：根是用户声明的范围，
     不是"盘上被发现的东西"，所以它不产生 `ScanEntry`；但它的确被 `os.scandir` 打开过。
     D:/work 那次实测：`dirs_seen` 47,754、`dirs_entered` 46,167、`dirs_pruned` 1,588——
-    46,167 = (47,754 − 1,588) + 1。**不要把这个 +1 当 bug 顺手抹掉。**
+    46,167 = (47,754 - 1,588) + 1。**不要把这个 +1 当 bug 顺手抹掉。**
+
+    （这里的减号是 ASCII 的：U+2212 在 GBK 控制台上编不出来，`print` 出来会抛
+    `UnicodeEncodeError`。本行只是文档，但它旁边就是会被打印的那些行——顺手保持
+    一致，省得有人抄走。）
     """
 
     roots_total: int = 0
     roots_scanned: int = 0
+    #: **没被扫的根**：不可达（盘没插、路径不存在），或被目录级标记排除。两种都不
+    #: 报错——它们都是运行时事实，不是配置错误；但都必须出现在报表里，否则"根写了
+    #: 却没索引到东西"会没有任何痕迹。
     roots_unreachable: list[tuple[str, str]] = field(default_factory=list)
 
     dirs_seen: int = 0
@@ -336,3 +350,30 @@ def reparse_tag_of(stat_result: os.stat_result) -> int:
 def path_of(entry: os.DirEntry[str]) -> str:
     """`DirEntry` → 保留大小写的正斜杠路径（给 `ScanEntry.path` 用）。"""
     return str(entry.path).replace("\\", "/")
+
+
+def has_noindex_marker(directory: str | os.PathLike[str]) -> bool:
+    """目录里有没有 `.lsearch-noindex`（语义见 `filters.py` 第九条）。
+
+    用 `os.path.lexists` 而**不是** `exists`：标记是个空文件，但用户完全可能把它
+    做成指向别处的链接（甚至一个断链）。`exists` 在那种情况下返回 False，于是标记
+    **静默失效**——而"我明明放了标记却没生效"是最难查的一类，因为它连个错误都没有。
+    这里要问的是"那个名字在不在"，不是"它指向的东西在不在"。
+
+    成本是每个目录一次 `lexists`（`GetFileAttributes` 一次系统调用，不进缓存也不
+    列目录）。D:/work 实测 47,754 个目录、C: 盘 655,515 个——**这几十万次系统调用
+    的量级远小于同一轮里每个文件都要做的 `stat`**，所以没有为它加开关。
+    """
+    return os.path.lexists(os.path.join(os.fspath(directory), NOINDEX_MARKER))
+
+
+def marker_reason() -> str:
+    """被标记剪掉的那种条目，`reason` 里写的那句话。
+
+    写成函数而不是散在扫描器里的字面量：`F2-06` 的 `--dry-run` 要把这类归到
+    「规则之外」那一栏（它不来自任何一行规则，硬塞进某条规则会让报表说谎），
+    两边必须给出一模一样的字符串。扫描根也用同一句——根本来就是一个目录。
+    """
+    return f"目录里有 {NOINDEX_MARKER}（目录级标记，整棵子树不索引）"
+
+

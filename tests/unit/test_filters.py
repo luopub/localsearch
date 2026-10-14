@@ -14,6 +14,11 @@ r"""F2-03：`.lsearchignore` 解析与两层分区。关联验收项：无（A8/
 
 第 4 组是这份文件里最值钱的几条：前三组测的是"我写的代码自洽"，只有第 4 组测
 "用户真正会碰到的那份规则文件被解释成了什么"。
+
+5. **目录级标记 `.lsearch-noindex`**（`F2-05`）——它**不是规则**（语义见 `filters.py`
+   第九条），所以这里只测"名字"这一层：代码里的名字与 `.lsearchignore` 里写给用户
+   的名字是否仍然同一个，以及比对的大小写。**行为**（整棵子树、`!` 救不回、根本身）
+   在 `test_scanner_scandir.py` 里测——那才是它生效的地方。
 """
 
 from __future__ import annotations
@@ -521,3 +526,61 @@ def test_managed_entries_are_absolute_prefix_rules_that_actually_match() -> None
     )
     assert decide(rules, f"{DEFAULT_DATA_DIR}/index.db") is Action.SKIP
     assert decide(rules, f"{filters.PROJECT_ROOT}/.venv/Lib/site.py") is Action.SKIP
+
+
+# ==============================================================================
+# 5. 目录级标记 `.lsearch-noindex`（`F2-05`）
+# ==============================================================================
+
+
+def test_the_marker_name_matches_what_the_rule_file_documents(shipped_text: str) -> None:
+    """代码里的标记名与 `.lsearchignore` 里**写给用户的那个名字**逐字相同。
+
+    标记不经过规则文件，所以上面四组解析/匹配测试**一条都覆盖不到它**；但它同样是
+    用户要照着写的东西——两边一旦分叉，症状是"照说明放了文件却什么都没发生"，
+    而且扫描器不会报错。要钉的是**说明标记的那一行里写的就是这个名字**。
+
+    不能反过来写成"文件里只有这一个 `.lsearch-*` 名字"：文件里本来还有几个——
+    索引库自己的边车文件（`.lsearch-wal` / `.lsearch-shm` / `.lsearch-tmp`）。
+    """
+    lines = shipped_text.splitlines()
+    doc = [ln for ln in lines if "空文件" in ln]
+    assert len(doc) == 1, "说明标记的那一句话应当只有一处（多一处就会有两份说法）"
+    assert filters.NOINDEX_MARKER in doc[0]
+
+
+def test_the_marker_name_is_not_a_rule_in_the_shipped_file(shipped: IgnoreRules) -> None:
+    """标记**不能**靠规则文件生效——它是目录级的，与规则无关。
+
+    真有人往规则文件里写一行 `.lsearch-noindex` 也不会怎样（那只是个没人会命中的
+    文件名规则），这里要钉的是"它不在规则表里"：一旦它在，`--dry-run` 的规则命中
+    表里就会多出一行，而那一行的语义（"排掉这个名字的文件"）与标记的语义（"排掉
+    放着它的整棵子树"）根本不是一回事。
+    """
+    assert not [r for r in shipped.rules if filters.NOINDEX_MARKER in r.pattern]
+
+
+@pytest.mark.parametrize(
+    "name", [".lsearch-noindex", ".LSEARCH-NOINDEX", ".LSearch-NoIndex"]
+)
+def test_marker_name_comparison_is_case_insensitive(name: str) -> None:
+    """NTFS 大小写不敏感，所以 `os.path.lexists` 确实会命中 `.LSEARCH-NOINDEX`。
+
+    名字的**比对**也必须同样不敏感——`scandir` 后端不问名字（它直接问文件系统），
+    但 MFT 后端（`F2-02`）只能在记录流里按名字认标记，那里差一个大小写就是
+    "标记在这台机器上生效、在那台机器上不生效"，而两边看起来一模一样。
+    """
+    assert filters.is_noindex_marker(name) is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [".lsearch-noindex.bak", "lsearch-noindex", ".lsearch-noindex2", ".lsearch-noindex "],
+)
+def test_a_name_merely_resembling_the_marker_is_not_it(name: str) -> None:
+    """前缀相似的东西不是标记：`.lsearch-noindex.bak` 是备份，不是标记。
+
+    放宽成 `startswith` 会让"把旧标记备份成 .bak 留在原地"继续生效——而用户做备份
+    这个动作，恰恰说明他想让它**停止**生效。
+    """
+    assert filters.is_noindex_marker(name) is False

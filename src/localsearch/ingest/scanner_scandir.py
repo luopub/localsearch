@@ -37,9 +37,11 @@ r"""默认扫描后端：`os.scandir`（P2 / `F2-01`）。测试落点 `tests/un
 ------------------------------------------------------------------------------
 
 本模块**不解释规则**：每一条都问 `IgnoreRules.decide()`，包括"要不要下潜"和
-"子项继承什么"。它只负责三件规则管不到的事：**reparse point**、**`data_dir` 硬性
+"子项继承什么"。它只负责四件规则管不到的事：**reparse point**、**`data_dir` 硬性
 剔除**（计划 §4.5.1 的第 2 重机制——索引器在往数据目录里持续写文件，规则匹配对它
-存在竞态）、**`max_file_mb` 上限**（计划 §8 的 e 条）。
+存在竞态）、**目录级标记 `.lsearch-noindex`**（`F2-05`，语义见 `filters.py` 第九条；
+**排在规则之前**，因为它不参与"后写优先"、也不该被 `!` 救回）、**`max_file_mb`
+上限**（计划 §8 的 e 条）。
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ from localsearch.ingest.base import (
     ScanError,
     ScanStats,
     check_rules_roots,
+    has_noindex_marker,
     inside,
+    marker_reason,
     path_of,
     reparse_tag_of,
 )
@@ -122,7 +126,8 @@ class ScandirScanner:
         on_skip: EntryCallback | None,
     ) -> None:
         """一个扫描根。**不可达只记不抛**——盘没插、网络盘没挂载都是运行时事实
-        （`doctor` 的「索引根目录」一栏也是这么判的），不是配置错误。"""
+        （`doctor` 的「索引根目录」一栏也是这么判的），不是配置错误。被标记排除的根
+        走同一个列表：它们都不是错误，但都必须在报表里留下痕迹。"""
         if self._inside_data_dir(norm):
             stats.roots_unreachable.append((raw, "在 data_dir 里面，按硬性剔除跳过"))
             return
@@ -132,6 +137,12 @@ class ScandirScanner:
             return
         if not path.is_dir():
             stats.roots_unreachable.append((raw, "不是一个目录"))
+            return
+        # 根也要判标记：它是**最该判**的一个——用户把标记放进根，意思就是"这一整片
+        # 先别索引"。根不产生 ScanEntry（见 ScanStats 的注释），所以这里只能记进
+        # roots_unreachable，而不是走目录那条路。
+        if has_noindex_marker(path):
+            stats.roots_unreachable.append((raw, marker_reason()))
             return
         stats.roots_scanned += 1
         self._walk(path, norm, rules, stats, on_entry, on_skip)
@@ -265,7 +276,24 @@ class ScandirScanner:
             )
             return
 
-        # 4) 其余交给规则
+        # 4) 目录级标记 `.lsearch-noindex`：整棵子树不索引，且**不可被 ! 救回**
+        #    （filters.py 第九条）。排在下潜前、排在规则前：
+        #    - 排在下潜前，是因为"进去以后发现标记再回头"会让结果取决于条目枚举顺序；
+        #    - 排在规则前，是因为标记是用户在那个目录里亲手放的，比规则里任何一行
+        #      都更贴近意图，所以不参与"后写优先"。
+        #    只对目录判：标记管的是自己所在的**目录**，与同目录里的文件无关。
+        if is_dir and has_noindex_marker(path):
+            stats.dirs_pruned += 1
+            self._send(
+                self._entry(
+                    path, name, stat, Action.SKIP, marker_reason(), 0, is_dir,
+                    rules, inherited, root_norm,
+                ),
+                on_skip,
+            )
+            return
+
+        # 5) 其余交给规则
         decision = rules.decide(path, is_dir=is_dir, inherited=inherited)
         action = decision.action
 

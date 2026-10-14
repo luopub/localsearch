@@ -10,6 +10,10 @@
 
 - **剪枝**要断言**子树里的文件根本不在流里**（连 `on_skip` 都不在）。"父目录被排除、
   子项又被 `!` 放开"这种写法在 walker 里是救不回来的，测试把这条语义写死。
+- **目录级标记 `.lsearch-noindex`**（`F2-05`）用**真文件**测：它就是"某个目录里有个
+  文件"这么简单的东西，替身只会把答案变成"我以为文件系统会这样"。它同样要断言
+  "子项不在流里"，另外还要一条**对照树**——同一个规则文件，有标记与没标记两种结果，
+  否则测出来的差异可能根本来自规则。
 - **reparse point** 用**真的 junction**（`mklink /J` 不需要管理员，本机实测可建）。
   只有一种情况造不出来：符号链接**文件**要权限（本机建不了），那一条用替身
   （monkeypatch）测，并在测试里写明白它测的是哪一半。
@@ -482,6 +486,117 @@ def test_sibling_directory_with_a_shared_prefix_is_kept(tmp_path: Path):
     tree(tmp_path, {"data/x": "1", "database/y.txt": "2"})
     kept, _, _ = scan(tmp_path, data_dir=str(tmp_path / "data"))
     assert "database" in names(kept)
+
+
+# ==============================================================================
+# F2. 目录级标记 `.lsearch-noindex`（`F2-05`；语义见 filters.py 第九条）
+# ==============================================================================
+#
+# 这一组的每一条都在钉"它不是一条规则"：不经过规则文件、管整棵子树、`!` 救不回、
+# 放错层就是放错层。第 5 条（名字比对的大小写）在 `test_filters.py` 里。
+
+
+def test_the_marker_prunes_its_own_directory_and_everything_below(tmp_path: Path):
+    """标记在 `marked/` 里 → `marked` 与它以下**一条都不进流**，连 `on_skip` 都没有。
+
+    断言"子项不在流里"而不是"没报错"：剪枝的正确性只能这么测（`R4` 那次实测就是
+    靠"数错了"发现的）。
+    """
+    tree(
+        tmp_path,
+        {"marked/deep/deeper/x.txt": "1", "marked/sibling.txt": "2", "outside.txt": "3"},
+    )
+    (tmp_path / "marked" / ".lsearch-noindex").write_text("", encoding="utf-8")
+    kept, skipped, stats = scan(tmp_path)
+
+    assert names(kept) == {"outside.txt"}
+    assert "deep" not in names(skipped), "剪掉的目录不该被下潜，子项自然也进不了流"
+    assert "x.txt" not in names(skipped)
+    assert entry_of(skipped, "marked").reason == base.marker_reason()
+    assert stats.dirs_pruned == 1
+    # 标记文件自己也不在流里——它所在的目录已经整棵被剪掉了
+    assert ".lsearch-noindex" not in names(kept) | names(skipped)
+    # 剪掉的目录既不算"进去过"也不算"保留"：dirs_entered = dirs_kept + 根数
+    assert stats.dirs_entered == stats.dirs_kept + 1
+
+
+def test_a_negation_cannot_rescue_a_marked_directory(tmp_path: Path):
+    """`!` 救不回标记剪掉的目录——这是"它排在规则之前"的可观测后果。
+
+    对照的那棵树是**同一个 `ignore`**、同一个形状，唯一差别是没有那个标记文件；
+    两者结果完全不同，说明起作用的是标记，不是规则文件里写的东西。
+    """
+    tree(tmp_path / "no_marker", {"marked/a.txt": "x"})
+    tree(tmp_path / "with_marker", {"marked/a.txt": "x"})
+    (tmp_path / "with_marker" / "marked" / ".lsearch-noindex").write_text(
+        "", encoding="utf-8"
+    )
+    ignore = "!marked/\n!marked/**\n"
+
+    kept_plain, _, _ = scan(tmp_path / "no_marker", ignore=ignore)
+    assert names(kept_plain) == {"marked", "a.txt"}
+
+    kept, skipped, _ = scan(tmp_path / "with_marker", ignore=ignore)
+    assert kept == [], "白名单例外不该把一个带标记的目录救回来"
+
+    entry = entry_of(skipped, "marked")
+    assert entry.reason == base.marker_reason()
+    # 规则说的是"留下"（那条 `!` 命中了），标记说的是"走"——**标记赢**。这正是
+    # "排在规则之前"的可观测形态，也让这个测试不至于退化成"反正是排掉了"。
+    assert entry.decision.action is Action.INDEX
+    assert entry.decision.matched is True
+    # 两句话必须是不同的句子：`--dry-run` 靠 `reason == decision.reason` 判断这一笔
+    # 该不该记在某条规则头上，相同就会被记到那条白名单规则的账上（记账记反了）。
+    assert entry.decision.reason != entry.reason
+
+
+def test_a_marker_in_a_grandchild_leaves_the_parent_indexed(tmp_path: Path):
+    """标记只管自己那棵子树，**不往上传**：`top/inner` 有标记，`top` 照旧在流里。"""
+    tree(tmp_path, {"top/inner/a.txt": "1", "top/b.txt": "2"})
+    (tmp_path / "top" / "inner" / ".lsearch-noindex").write_text("", encoding="utf-8")
+    kept, skipped, _ = scan(tmp_path)
+    assert names(kept) == {"top", "b.txt"}
+    assert names(skipped) == {"inner"}
+
+
+def test_a_marker_in_the_scan_root_stops_the_root(tmp_path: Path):
+    """根是最该判标记的地方：用户把标记放进根，意思就是"这一整片先别索引"。
+
+    根不产生 `ScanEntry`（见 `ScanStats` 的注释），所以它只能落到 `roots_unreachable`
+    里——那条列表从 `F2-05` 起也收"被标记排除的根"，两种都不是错误。
+    """
+    tree(tmp_path, {"a.txt": "x"})
+    (tmp_path / ".lsearch-noindex").write_text("", encoding="utf-8")
+    kept, skipped, stats = scan(tmp_path)
+    assert kept == [] and skipped == []
+    assert stats.roots_scanned == 0
+    assert stats.roots_unreachable == [(str(tmp_path), base.marker_reason())]
+
+
+def test_the_marker_name_is_case_insensitive_on_disk(tmp_path: Path):
+    """真造一个 `.LSEARCH-NOINDEX`：NTFS 大小写不敏感，标记照样生效。
+
+    这一条测的是 `os.path.lexists` 在**真实文件系统**上的行为，不是我们怎么比对
+    名字——后者在 `test_filters.py` 里单独测（MFT 后端要靠它）。
+    """
+    tree(tmp_path, {"marked/a.txt": "x"})
+    (tmp_path / "marked" / ".LSEARCH-NOINDEX").write_text("", encoding="utf-8")
+    kept, skipped, _ = scan(tmp_path)
+    assert kept == []
+    assert entry_of(skipped, "marked").reason == base.marker_reason()
+
+
+def test_a_similarly_named_file_does_not_mark_the_directory(tmp_path: Path):
+    """名字像但不是：`.lsearch-noindex.bak` 是备份，不是标记。
+
+    放宽成"前缀匹配"会让"把标记改名备份在原地"继续生效——而用户做这个动作，恰恰
+    说明他想让它**停止**生效。
+    """
+    tree(tmp_path, {"marked/a.txt": "x"})
+    (tmp_path / "marked" / ".lsearch-noindex.bak").write_text("", encoding="utf-8")
+    kept, skipped, _ = scan(tmp_path)
+    assert names(kept) == {"marked", "a.txt", ".lsearch-noindex.bak"}
+    assert skipped == []
 
 
 # ==============================================================================
