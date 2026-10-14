@@ -182,11 +182,61 @@ def test_all_drives_is_refused_with_the_e10_reason(tmp_path: Path):
     assert "roots" in str(err.value)
 
 
-def test_mft_backend_says_it_is_not_landed_yet(tmp_path: Path):
-    """`F2-02` 之前，`backend="mft"` 必须**报错**而不是悄悄退回 scandir。"""
+def test_explicit_mft_refuses_and_quotes_the_probe_reason(monkeypatch, tmp_path: Path):
+    """`F2-02` 起 `backend="mft"` 是一个**真后端**，用不了时仍然必须报错。
+
+    不偷偷换成 scandir：用户点名了后端，静默换掉等于让他以为"MFT 跑过了"。
+    这里把探测结果**替身化**——真探测的结果取决于当前终端提没提权（本机现在就没提），
+    拿它当断言会让这条测试的通过与否取决于谁在跑它。
+    """
+    from localsearch.ingest import scanner_mft
+
+    monkeypatch.setattr(
+        scanner_mft, "probe",
+        lambda config: scanner_mft.MftProbe(False, "打开卷设备 失败：WinError 5"),
+    )
     with pytest.raises(ScanError) as err:
         make_scanner(ScanConfig(roots=(str(tmp_path),), backend="mft"))
-    assert "F2-02" in str(err.value)
+    message = str(err.value)
+    # 探测给的原因要原样带出来：只说"用不了"等于把线索扔了
+    assert "WinError 5" in message
+    # 并且要指出退路，而不是让用户自己猜
+    assert "scandir" in message
+    assert "auto" in message
+
+
+def test_auto_falls_back_to_scandir_without_error(monkeypatch, tmp_path: Path):
+    """`auto` 探测失败时**静默**回退（`D11` / `R15`）：没提权是常态，不是故障。
+
+    回退原因不在这里报——它由 `probe()` 单独给出、`doctor` 去印（"为什么这次慢了"
+    要能回答）。所以这一条既断言不抛，也断言回退原因**没有**被塞进别的什么地方。
+    """
+    from localsearch.ingest import scanner_mft
+
+    monkeypatch.setattr(
+        scanner_mft, "probe",
+        lambda config: scanner_mft.MftProbe(False, "打开卷设备 失败：WinError 5"),
+    )
+    scanner = make_scanner(ScanConfig(roots=(str(tmp_path),), backend="auto"))
+    assert scanner.name == "scandir"
+
+
+def test_probe_saying_ok_gives_the_mft_backend(monkeypatch, tmp_path: Path):
+    """探测通过时 `auto` 与显式 `mft` 都要走 MFT。
+
+    这条与上面两条合起来才是完整的接线：`make_scanner` 是**唯一**一处按后端分支的
+    地方，四种组合（探测成/败 × 指名 MFT/auto）都对着替身核一遍，真机上跑成什么样
+    都不影响这三条。
+    """
+    from localsearch.ingest import scanner_mft
+
+    monkeypatch.setattr(
+        scanner_mft, "probe",
+        lambda config: scanner_mft.MftProbe(True, "可用：C:", ("C:",)),
+    )
+    for backend in ("auto", "mft"):
+        scanner = make_scanner(ScanConfig(roots=(str(tmp_path),), backend=backend))
+        assert scanner.name == "mft", backend
 
 
 @pytest.mark.parametrize("backend", ["auto", "scandir"])

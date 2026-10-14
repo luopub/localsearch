@@ -110,6 +110,16 @@ class ScanEntry:
     reason: str
     error: str | None = None
     reparse_tag: int = 0
+    #: NTFS 的文件引用号（FRN），**不知道就是 0**。
+    #:
+    #: `F2-02` 起两个后端填的值不一样，这是刻意的：MFT 后端从枚举里**白拿**
+    #: （`FSCTL_ENUM_USN_DATA` 每条记录都带），而 `scandir` 后端要拿它就得对每条
+    #: 条目 `os.stat` 一次（实测 36 µs/条，C: 上 347 万条 = 125 s），所以那边一律
+    #: 留 0，**不要**把它读成"这个文件没有 FRN"。
+    #:
+    #: 两个用处：`F2-02` 的核对按它折叠硬链接（`ingest/parity.py`），`F6-01` 的
+    #: USN 增量要靠它把日志里的变化对回库里的行。
+    frn: int = 0
 
     @property
     def key(self) -> str:
@@ -119,6 +129,40 @@ class ScanEntry:
 # ==============================================================================
 # 一轮扫描的账目
 # ==============================================================================
+
+
+@dataclass
+class MftStats:
+    """MFT 后端（`F2-02`）独有的账。`scandir` 后端留 `None`。
+
+    **为什么单独一块，而不是散进 `ScanStats` 那几栏**：这些数的**读法完全不同**。
+    `records` 是整个卷的记录数，含扫描范围之外的一大片；把它与 `entries_seen`
+    相比会立刻得出"读错了"的结论，而它其实是对的。分开放，名字就能说明白。
+
+    `outside_roots` / `system` / `hidden` 三项回答的是同一个问题——"MFT 看得见、
+    但 `scandir` 从来不会看到"的那部分去哪了。**`scandir` 没有对应的数**，因为
+    它根本看不见它们。
+    """
+
+    #: 枚举到的记录总数（整卷，含不在扫描根下的）
+    records: int = 0
+    #: 不在任何扫描根下
+    outside_roots: int = 0
+    #: 落在 NTFS 保留记录（记录号 0–15 的 `$Extend` 等）的子树里——Win32 的目录
+    #: 枚举从来不返回它们，所以 `scandir` 那边也不存在
+    system: int = 0
+    #: 在扫描根下，但祖先目录被剪枝（规则 / 标记 / 嵌套根），因而 `scandir` 从没
+    #: 走到过。**不是错误**，只是"看见了但没被算数"
+    hidden: int = 0
+    #: 父记录的序号对不上（父槽位已被别的文件复用）的条数。正常卷上应当是 0——
+    #: 不是 0 就说明"只比记录号"会认错文件
+    broken_links: int = 0
+    #: 补 `size`/`mtime` 打了几次 `GetFileAttributesExW`（`ntfs.py` 里那笔单价账）
+    attributes_calls: int = 0
+    bad_records: int = 0
+    other_versions: int = 0
+    volumes: int = 0
+    enumerate_seconds: float = 0.0
 
 
 @dataclass
@@ -137,6 +181,11 @@ class ScanStats:
     不是"盘上被发现的东西"，所以它不产生 `ScanEntry`；但它的确被 `os.scandir` 打开过。
     D:/work 那次实测：`dirs_seen` 47,754、`dirs_entered` 46,167、`dirs_pruned` 1,588——
     46,167 = (47,754 - 1,588) + 1。**不要把这个 +1 当 bug 顺手抹掉。**
+
+    ⚠ **MFT 后端（`F2-02`）永远是 0，这是对的，不是漏了**：它从不打开目录（枚举的是
+    卷上的记录，不递归目录），所以"进过几个目录"这件事在那一侧根本不存在。要去比
+    "MFT 是不是少走了 4.7 万个目录"之前先看这一行。同理，MFT 侧的 `dirs_seen` 与
+    `scandir` 侧同义，`dirs_entered` 不同义。
 
     （这里的减号是 ASCII 的：U+2212 在 GBK 控制台上编不出来，`print` 出来会抛
     `UnicodeEncodeError`。本行只是文档，但它旁边就是会被打印的那些行——顺手保持
@@ -171,6 +220,10 @@ class ScanStats:
     reparse_tags: dict[int, int] = field(default_factory=dict)
 
     seconds: float = 0.0
+
+    #: MFT 后端才有（`F2-02`）——见 `MftStats`。`scandir` 后端留 `None`，
+    #: 报表据此决定要不要印那几行。
+    mft: MftStats | None = None
 
     def add_error(self, path: str, why: str) -> None:
         self.errors_total += 1
@@ -262,11 +315,16 @@ class Scanner(Protocol):
 def make_scanner(config: ScanConfig) -> Scanner:
     """按 `[scan] backend` 造后端。
 
-    两种情况**直接报错而不是猜着跑**：
+    两条约定（`D11` / `R15`）：
 
-    - `all_drives = true`：见模块文档（`E10`），本机判不出哪些卷"会一直在"；
-    - `backend = "mft"`：`F2-02` 还没落地。`auto` 现在等价于 `scandir`
-      （MFT 的探测在 `F2-02` 接进来后才会真的"尝试并回退"）。
+    - **`auto` = 先探测、失败静默回退 `scandir`**。回退**不报错**：默认配置在没有
+      管理员权限的机器上必须能跑（计划 §4.8 的 `LeastPrivilege`），"没提权"是常态
+      而不是故障。为什么回退原因不能让 `auto` 自己咽下去：`doctor` 要把"当前实际
+      走的是哪条路"印出来，否则"为什么这次慢了"就没有答案——所以原因由
+      `scanner_mft.probe()` 单独给出，`doctor` 调它。
+    - **显式的 `mft` 用不了就报错**，不偷偷换成 `scandir`：用户点名了后端，静默换掉
+      等于让他以为"MFT 跑过了"。这一条与 `index.py` 里 `--dry-run` 的态度一致
+      （"偷偷忽略比报错坏得多"）。
     """
     if config.all_drives:
         raise ScanError(
@@ -274,13 +332,22 @@ def make_scanner(config: ScanConfig) -> Scanner:
             "（E:）报成固定盘（PROGRESS §3 的 E10），枚举「所有固定盘」就会把会掉线的盘"
             "当成一直在的盘建全量索引。请在 [paths] roots 里显式写明要索引的目录。"
         )
-    if config.backend == "mft":
-        raise ScanError(
-            "backend = 「mft」还没落地（P2 的 F2-02）。现在只能用 「scandir」 或 "
-            "「auto」；MFT 需要管理员权限且限 NTFS，落地后会按「尝试失败即回退」的方式接进 auto。"
-        )
-    if config.backend not in ("auto", "scandir"):
+    if config.backend not in ("auto", "scandir", "mft"):
         raise ScanError(f"[scan] backend 只认 auto / scandir / mft，实际是 {config.backend!r}")
+
+    if config.backend in ("auto", "mft"):
+        from localsearch.ingest.scanner_mft import MftScanner, probe
+
+        result = probe(config)
+        if result.ok:
+            return MftScanner(config)
+        if config.backend == "mft":
+            raise ScanError(
+                f"backend = 「mft」在本机用不了：{result.reason}。"
+                "MFT 需要管理员权限、且只对本地 NTFS 卷有效；改用 「scandir」 或 "
+                "「auto」（auto 会自动回退，不会报错），或到管理员终端里重跑。"
+            )
+        # auto：静默回退。原因不丢——`probe()` 能再给一次，`doctor` 就是那么取的。
 
     from localsearch.ingest.scanner_scandir import ScandirScanner
 

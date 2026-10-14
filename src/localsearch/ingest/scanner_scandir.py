@@ -71,6 +71,38 @@ DATA_DIR_REASON = "硬性剔除 data_dir（索引器正在往里写，规则匹�
 NESTED_ROOT_REASON = "这是另一个扫描根，由它自己那一轮负责"
 
 
+# ------------------------------------------------------------------------------
+# 「规则之外」那几条理由的**唯一**产出点
+# ------------------------------------------------------------------------------
+#
+# `F2-02` 起有两个后端（`scandir` 与 `mft`）产生同一批理由，而 `ingest/report.py`
+# 的分组键**是理由文本本身**（`OTHER_PREFIX` = 前 28 个字符）。同一个成因在两处
+# 各写一遍，只要有一个字不一样，`--dry-run` 的账目里就会出现两行同一个原因——
+# 而它看起来只是"多了几行"，不会报错。所以措辞只在下面这几个函数里定义。
+#
+# 措辞的**顺序**也是一条约束：`report.bucket` 取前 28 个字符当分组键，所以
+# **逐条会变的部分必须排在第 28 个字符之后**。第一版把文件大小写在前面，一次真实
+# 全盘 dry-run 里同一条理由裂成了 8 行、每行 1~8 个文件（2026-10-15 实测，
+# 原始输出见 `docs/reports/F2-06-逐规则命中分布.md`）。阈值在一次运行里是常量，
+# 留在前缀里；大小逐文件不同，压到最后。
+
+
+def over_limit_reason(max_file_mb: int, size: int) -> str:
+    """规则判了 INDEX、但文件超过 `[scan] max_file_mb` 时改写成的理由。"""
+    return (
+        f"超过 [scan] max_file_mb = {max_file_mb}"
+        f"：只记名字与元数据（本文件 {size / 1024 / 1024:.1f} MiB）"
+    )
+
+
+def reparse_dir_reason(tag: int) -> str:
+    return f"reparse point（0x{tag:X}）：目录不下潜"
+
+
+def reparse_file_reason(tag: int) -> str:
+    return f"reparse point（0x{tag:X}）：只记名字，不读正文"
+
+
 class ScandirScanner:
     """`os.scandir` 栈式遍历。无需权限、无 NTFS 限制，是 `auto` 的兜底。"""
 
@@ -235,7 +267,7 @@ class ScandirScanner:
                 self._send(
                     self._entry(
                         path, name, stat, Action.SKIP,
-                        f"reparse point（0x{tag:X}）：目录不下潜", tag, is_dir,
+                        reparse_dir_reason(tag), tag, is_dir,
                         rules, inherited, root_norm,
                     ),
                     on_skip,
@@ -245,7 +277,7 @@ class ScandirScanner:
                 self._send(
                     self._entry(
                         path, name, stat, Action.NAME_ONLY,
-                        f"reparse point（0x{tag:X}）：只记名字，不读正文", tag, is_dir,
+                        reparse_file_reason(tag), tag, is_dir,
                         rules, inherited, root_norm,
                     ),
                     on_entry,
@@ -332,16 +364,8 @@ class ScandirScanner:
         reason = decision.reason
         if action is Action.INDEX and stat.st_size > self.config.max_file_bytes:
             action = Action.NAME_ONLY
-            # 措辞的**顺序**是一条约束，不是修辞：`report.bucket` 拿理由的前
-            # `report.OTHER_PREFIX`（28）个字符给「规则之外」分组，所以**逐条会变的部分
-            # 必须排在第 28 个字符之后**。第一版把文件大小写在前面，一次真实全盘
-            # dry-run 里同一条理由裂成了 8 行、每行 1~8 个文件（2026-10-15 实测，
-            # 原始输出见 `docs/reports/F2-06-逐规则命中分布.md`）——那不是分组。
-            # 阈值在一次运行里是常量，留在前缀里；大小逐文件不同，压到最后。
-            reason = (
-                f"超过 [scan] max_file_mb = {self.config.max_file_mb}"
-                f"：只记名字与元数据（本文件 {stat.st_size / 1024 / 1024:.1f} MiB）"
-            )
+            # 措辞在 `over_limit_reason` 里（唯一产出点，语序的约束也在那里写着）。
+            reason = over_limit_reason(self.config.max_file_mb, stat.st_size)
             stats.files_over_limit += 1
         if action is Action.INDEX:
             stats.files_index += 1
