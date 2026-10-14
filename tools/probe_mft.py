@@ -51,6 +51,10 @@ Win32——这也顺便回答了更根本的问题：**这件事需不需要一�
   * **`scandir` 的数极度依赖缓存与当时的机器负载**，而且权限被拒的目录会**整棵
     跳过**，是系统性地**少算**。所以它只能与 MFT 看**量级**差别；逐条一致性是
     `F2-02` 的活，本脚本不声称一致。
+  * **`scandir` 侧必须跳过 reparse point，否则数出来的东西根本不对**：本机的
+    junction（`%LOCALAPPDATA%\\Application Data` 等 11 个）指回自己所在的目录，
+    下潜会把同一棵树数很多遍——实测时间 **2.23×**、文件数虚高 1.2 万。
+    MFT 侧不受影响（它枚举的是记录，不递归目录）。
   * **MFT 记录数通常多于 `scandir` 数**：MFT 含目录、元数据文件，以及每卷各自的
     内部记录。数量不等是**预期**，不是 bug。
 
@@ -561,8 +565,17 @@ def mft_rounds(handle: int, high_usn: int, buffer_kb: int, rounds: int,
 
 def scandir_count(root: str) -> dict:
     """栈式遍历，数文件/目录。`follow_symlinks=False` 走的是 scandir 已缓存的
-    stat，不会为每个条目多打一次系统调用。"""
-    files = dirs = errs = 0
+    stat，不会为每个条目多打一次系统调用。
+
+    **reparse point（junction / 符号链接 / 挂载点）只计数、不下潜**——这一条不是
+    优化，是正确性。本机 `%LOCALAPPDATA%\\Application Data` 这类 junction 指回
+    它自己所在的目录，下潜会把同一棵树数很多遍。实测在
+    `C:\\Users\\<user>\\AppData\\Local` 上：不下潜 **61.99 s / 1,561,747 文件**，
+    跳过后 **27.78 s / 1,549,646 文件 + 11 个 junction**——时间差 **2.23×**，
+    文件数虚高 **12,101**。全盘跑就是"十几分钟也跑不完"。
+    判断位与 MFT 侧用的是同一个 `FILE_ATTRIBUTE_REPARSE_POINT`，两边口径一致。
+    """
+    files = dirs = errs = skipped_reparse = 0
     stack = [root]
     t0 = time.perf_counter()
     while stack:
@@ -573,6 +586,10 @@ def scandir_count(root: str) -> dict:
                     try:
                         if e.is_dir(follow_symlinks=False):
                             dirs += 1
+                            st = e.stat(follow_symlinks=False)
+                            if st.st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                                skipped_reparse += 1
+                                continue
                             stack.append(e.path)
                         else:
                             files += 1
@@ -580,7 +597,8 @@ def scandir_count(root: str) -> dict:
                         errs += 1
         except OSError:
             errs += 1
-    return {"seconds": time.perf_counter() - t0, "files": files, "dirs": dirs, "errors": errs}
+    return {"seconds": time.perf_counter() - t0, "files": files, "dirs": dirs,
+            "errors": errs, "skipped_reparse": skipped_reparse}
 
 
 # ===========================================================================
@@ -725,6 +743,8 @@ def main() -> int:
             rate = (s["files"] + s["dirs"]) / max(s["seconds"], 1e-9) * 60
             print(f"    {s['seconds']:9.3f} s  文件 {s['files']:,}  目录 {s['dirs']:,}  "
                   f"拒绝 {s['errors']:,}  → {rate:,.0f} 条/分钟")
+            print(f"    跳过的 reparse point（junction/符号链接/挂载点，只计数不下潜）："
+                  f"{s['skipped_reparse']:,}")
 
     # ---------------- 汇总 ----------------
     section("5. 汇总：M8 与 D11 的输入")
