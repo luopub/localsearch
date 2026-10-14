@@ -240,11 +240,15 @@ def check_roots(config: Config) -> Check:
     事实而非配置错误。所以"报哪些根不可达"是 doctor 的活。
     """
     if config.paths.all_drives:
+        # WARN → FAIL（2026-10-15 随 F2-01 改）：v1 的扫描器**拒绝** all_drives = true，
+        # 所以这不是"现在能用、你知道一下"，而是"这样跑不了"——正是 FAIL 的定义。
         return Check(
             "索引根目录",
-            WARN,
-            "all_drives = true：忽略 roots，扫描所有固定盘",
-            "本机 GetDriveType 判不出本地性（E: 会被当成固定盘），确认你是有意打开的",
+            FAIL,
+            "all_drives = true：v1 不支持，扫描器会直接报错",
+            "本机 GetDriveType 判不出本地性（E10：E: 报 DRIVE_FIXED 却不是本地盘），"
+            "枚举「所有固定盘」会把会掉线的卷当一直在的卷建全量索引。"
+            "请在 [paths] roots 里显式写明要索引的目录",
         )
 
     lines: list[str] = []

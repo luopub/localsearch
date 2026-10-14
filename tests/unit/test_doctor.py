@@ -323,12 +323,18 @@ def test_missing_root_is_a_warning(box: dict[str, Path]) -> None:
     assert check.hint, "要说清「不可达的根会怎样」（不会被索引，也不会被 prune 清掉）"
 
 
-def test_all_drives_warns_about_locality(box: dict[str, Path]) -> None:
-    """`all_drives = true` 的危险在于"本地盘"判不出来（E10：E: 也是 DRIVE_FIXED）。"""
+def test_all_drives_is_a_failure_in_v1(box: dict[str, Path]) -> None:
+    """`all_drives = true` 在 v1 里是 FAIL，不是 WARN。
+
+    它原先报 WARN（"现在能用，你知道一下"），但 `F2-01` 的扫描器**直接拒绝**这个开关
+    （`ingest/base.py` 的 `make_scanner`），所以按 `doctor` 自己的定义——
+    **FAIL 是"这样跑不了"**——它已经不该是 WARN 了。危险本身仍是"本地盘判不出来"
+    （E10：E: 也报 `DRIVE_FIXED`），这一点写在 hint 里。
+    """
     write_template(box, all_drives=True)
     state = make_state(box["template"])
     check = check_roots(state.config)
-    assert check.status == WARN
+    assert check.status == FAIL
     assert "本地" in check.hint
 
 

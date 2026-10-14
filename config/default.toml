@@ -22,10 +22,10 @@ data_dir   = "D:/localsearch-data"
 # 计划 §4.5 模板里那个 M:/docs 在本机不存在，所以没有写进来。
 # 要加别的目录，直接往这个数组里追加，例如：["D:/work", "C:/Users/luopu/Documents"]
 roots      = ["D:/work"]
-# true 时忽略 roots，扫描全部"看起来是固定盘"的卷。
+# v1 里**不支持打开**：置 true 会让扫描器直接报错（ingest/base.py 的 make_scanner）。
 # ⚠ 本机实测（PROGRESS.md §3 的 E10）：GetDriveType 判不出"本地性"——
 #    E: 报 DRIVE_FIXED(3) 且是 NTFS，与 C:/D: 读数完全一样，而它不是本地盘。
-#    所以打开这个开关前先确认你真的想索引所有盘。
+#    枚举"所有固定盘"就会把会掉线的卷当一直在的卷建全量索引，所以宁可不做。
 all_drives = false
 
 # 模型缓存位置**不在这里配置**，一律跟随系统 HF_HOME
