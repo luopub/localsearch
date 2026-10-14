@@ -170,6 +170,11 @@ class Tee:
     会抛 UnicodeEncodeError 把整轮探针打断。所以先把 stdout reconfigure 成
     utf-8 + errors=replace——日志文件要的是**原始输出**，不能为了迁就控制台
     把内容改掉。
+
+    write() 里**每次都 flush**：不加这一条，日志文件在进程退出前一直是 0 字节
+    （实测过）。`-u` 只对被我替换掉的那个原始 sys.stdout 生效，管不到包装层。
+    这个脚本整轮的用途就是把原始输出留证，一旦中途崩掉却什么都没留下，
+    留证这件事本身就没做到。
     """
 
     def __init__(self, *streams):
@@ -181,6 +186,7 @@ class Tee:
                 st.write(s)
             except Exception:  # noqa: BLE001 —— 控制台写不进去不该影响日志
                 pass
+        self.flush()
         return len(s)
 
     def flush(self):
@@ -199,8 +205,9 @@ def setup_output(log_path: str | None) -> None:
     if log_path:
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        # newline="\n"：落盘就是 LF，省得报告阶段再做一次行尾归一
-        fh = open(p, "w", encoding="utf-8", newline="\n")
+        # newline="\n"：落盘就是 LF，省得报告阶段再做一次行尾归一。
+        # buffering=1：文本模式下行缓冲，与 Tee 里的 flush 一起做双保险。
+        fh = open(p, "w", encoding="utf-8", newline="\n", buffering=1)
         sys.stdout = Tee(sys.stdout, fh)
 
 
