@@ -398,6 +398,35 @@ class Run:
 
 _ST_MODEL = None
 
+
+def release_models(keep: str = "") -> None:
+    """把已加载的模型放掉，`keep` 可留一个（"st" 或 "onnx"）。
+
+    **为什么非要有这个**：一轮跑下来本工具要依次加载 **三份** 模型——ST fp32、
+    ST bfloat16（dtype 探针）、ONNX int8——而它们默认全部同时留在进程里。本机
+    15.37 GiB、可用约 4 GiB 时，峰值顶到 **7.49 GiB** 之后 onnxruntime 直接段错误
+    退出（2026-10-14 实测 `EXIT=139`，RSS 轨迹 4.31 → 7.49 GiB）。
+
+    三份模型**没有必要同时在手**：ST 的向量在扫描时就已取出来存进 `Run.embeddings`，
+    后面第 5 步的跨后端比对用的是 numpy 数组，不是模型对象。所以在段落边界处放掉
+    即可，代价是重跑同一段要重新加载。
+
+    注意 `main()` 里的局部引用（`model` / `sess`）也按着不放，光清这两个全局变量
+    不够；调用方需一并置 None。`gc.collect()` 是必须的——torch 的权重之间是循环
+    引用的，靠引用计数回收不掉。
+    """
+    global _ST_MODEL, _ONNX_SESS
+    before = peak_rss()
+    if keep != "st":
+        _ST_MODEL = None
+    if keep != "onnx":
+        _ONNX_SESS = None
+    gc.collect()
+    print(f"  [内存] 释放模型（保留={keep or '无'}）：释放前峰值 {human_bytes(before)}"
+          f" → 之后 {human_bytes(peak_rss())}"
+          f"（峰值只增不减，回收量看下一档位实际涨了多少）")
+
+
 # 各档位末列的 RSS 是**进程峰值**（GetProcessMemoryInfo），不是"这一档单独占多少"。
 # 同一进程里各档位共用一份权重，峰值只增不减，所以它是个上界；要读单档真实占用，
 # 看每段第一行的值，或者只跑那一档。这个数直接决定"最多能并行几个 worker"，
@@ -987,9 +1016,13 @@ def main() -> int:
         print(f"  不传 dtype 直接构造 SentenceTransformer 就会掉进这个坑里，而且")
         print(f"  **不会报错**，只会慢。这是 P0 最该抓出来的那类问题。")
         for d in ("float32", "bfloat16"):
+            # 两种 dtype 是两份独立权重。不先放掉前一份，探针期间就会同时按下两份
+            # ST（本机实测峰值 6.54 GiB），而本机可用只有 4 GiB 出头——这一步紧挨着
+            # 后面的 ONNX，是整轮内存最险的地方。放掉之后峰值由"一份 ST"封顶。
+            release_models()
             try:
                 r = run_st(texts, args.model_id, 8, args.dtype_probe_batch, args.warmup,
-                           cache=(d == args.st_dtype), prompt_name=args.prompt_name,
+                           cache=False, prompt_name=args.prompt_name,
                            max_seq=args.max_seq, dtype_name=d)
                 runs.append(r)
                 print(r.line())
@@ -1007,6 +1040,11 @@ def main() -> int:
     dim = 768  # 计划 §4.5 `[embed] dim`；下面拿实际向量形状核对
     if args.backend in ("both", "onnx") and onnx_file:
         section("第 4 步  ONNX int8 后端")
+        # 换后端之前先把 ST 放掉。ST fp32 常驻约 4.3 GiB，不清掉的话 ONNX 会在它
+        # 头上再要一份，峰值冲到 7.5 GiB —— 本机就是这么段错误的（EXIT=139）。
+        # 第 5 步的跨后端比对用的是已存下的 numpy 向量，不需要模型还在。
+        model = None
+        release_models()
         try:
             import onnxruntime as ort
             sess, load_s = _onnx_load(onnx_file, threads[-1], cache=True)
@@ -1083,12 +1121,9 @@ def main() -> int:
         # 从"可用内存"里被扣掉，测出来的结论会变成"这台机器放不下 2 个 worker"，
         # 而其实是**测量者自己**占的。这与"量网络要用将来真正发请求的那个客户端量"
         # 是同一类错误：先把自己摆到正确的位置，再量。
-        global _ST_MODEL, _ONNX_SESS
-        _ST_MODEL = None
-        _ONNX_SESS = None
         model = None      # main() 里的这两个局部名同样按着模型不放，一起断掉
         sess = None
-        gc.collect()
+        release_models()
         freed = machine_facts()
         print(f"  已释放父进程持有的模型；此刻可用内存 {human_bytes(freed['avail_ram'])}"
               f"（整轮开始时 {human_bytes(facts['avail_ram'])}）")
