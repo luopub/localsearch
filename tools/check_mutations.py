@@ -1,0 +1,302 @@
+r"""把"这条测试真的盯着那处代码"从一句话变成一条可复跑的结论。
+
+------------------------------------------------------------------------------
+为什么要有这个工具
+------------------------------------------------------------------------------
+
+`CLAUDE.md` 写着"每个功能点必须有自动化测试"，而这条规矩的落点在"红了的才是
+护栏"——**一条永远绿的测试等于没有测试**。P3 到现在为止，验这件事的办法是
+"把旧写法临时换回代码里，看它红不红"，而那是**一次性内联脚本**：按 §3 的
+规矩（`E12`）属于**最弱一档证据**，因为别人没法复跑、连当时改的是哪一行都
+只能靠叙述。
+
+`F3-02` 的「偏差」第 6 条与 `F3-03` 的记录都是这么做的，两次都靠它抓到了真
+问题（xlsx 那条截断测试**换不换对象都绿**）。所以这里把它做成工具：**改动的是
+被测源码、跑的是真 pytest、结论是"哪些测试红了"**——而不是我自己说它红了。
+
+------------------------------------------------------------------------------
+它做什么
+------------------------------------------------------------------------------
+
+对 `MUTATIONS` 里的每一条（按 `--only <id>` 可以只跑一组）：
+
+1. **要求那处改动在源码里出现且只出现一次**（`old` 在文件里的匹配数必须是 1）。
+   匹配 0 次说明这句代码已经被改过形（这条变体**过期了**），匹配多次说明它
+   改不准——两种都必须报错退出，不许"尽力而为"。
+2. **要求目标文件在 git 上是干净的**。这个工具会把工作区的源码改坏几秒钟，
+   要是文件本来就有未提交的改动，恢复之后分不清哪些是我的——**宁可拒绝跑**。
+3. 改坏 → 跑 `pytest`（只跑这一组点名的测试）→ **还原**。
+4. 判定：**必须红**，而且**红的必须包括点名的那条测试**、pytest 的退出码必须是
+   `1`（测试失败）。退出码 `2` 是收集期出错——那种情况下"红了"是假的：
+   整个文件没导进来，所有测试一起红，看着像护栏其实什么都没验。
+
+**任何一条没红，退出码就是 1**——它是这套东西的存在意义。
+
+退出时**逐字节比对**还原结果与原文，不一致就报错（那种情况下工作区已经被弄脏，
+得 `git checkout` 回来）。
+
+------------------------------------------------------------------------------
+一句话的诚实交代
+------------------------------------------------------------------------------
+
+它验的是"**这处代码被改坏时，这条测试会红**"，**不是**"这处代码是对的"。变体
+是**双向**的：把 `if direction in ("S", "W")` 改成 `if False` 证明南纬那条测试
+盯着它；反过来，要是有人把真正的逻辑写错、而测试也照着错的写，这里一条都抓
+不到。**它补的是"测试不是摆设"这一半，不是"实现是对的"那一半。**
+
+------------------------------------------------------------------------------
+用法
+------------------------------------------------------------------------------
+
+    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py
+    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py --only f3-04
+    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py --list
+
+⚠ **跑的时候本机在跑 pytest，占用率会上去**。它量的是"红不红"、不是耗时，
+所以不怕噪声——但也别拿它的运行时间当什么基准。
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+#: 变体表。每一条是"把一处代码改坏，点名的那条测试必须红"。
+#:
+#: 字段：`id`（组名）、`label`（这条变体在验什么，一句话）、`file`（相对仓库根）、
+#: `old` / `new`（必须是能在文件里**唯一**匹配的一段）、`tests`（点名的测试），
+#: `why`（这条变体对应哪个决定——**没有理由的变体不许留在表里**）。
+MUTATIONS: list[dict[str, object]] = [
+    {
+        "id": "f3-04",
+        "label": "解压炸弹不再翻译成 ParseFailed",
+        "file": "src/localsearch/extract/media_meta.py",
+        "old": "            except Image.DecompressionBombError as exc:",
+        "new": "            except Image.UnidentifiedImageError as exc:",
+        "tests": ["tests/unit/test_extract_media_meta.py"],
+        "expect": "test_a_decompression_bomb_is_a_failure_not_a_crash",
+        "why": "DecompressionBombError 不是 OSError（Pillow 里直接继承 Exception），"
+               "少接这一族它就会以未捕获异常冒出批量层——`A6` 的反面",
+    },
+    {
+        "id": "f3-04",
+        "label": "分数不再化成小数（退回 str()）",
+        "file": "src/localsearch/extract/media_meta.py",
+        "old": '    return f"{value:.6f}".rstrip("0").rstrip(".")',
+        "new": "    return str(value)",
+        "tests": ["tests/unit/test_extract_media_meta.py"],
+        "expect": "test_long_decimals_are_rounded_to_six_places",
+        "why": "⚠ 这条变体**一开始没有测试抓得住**：28/10、1/250、425/100 这几个样本上，"
+               "Pillow 的 IFDRational.__str__ 给出的字面量本来就和我们算的一样，"
+               "所以整句换成 str() 之后 113 条一条都不红（2026-10-16 实测）。"
+               "补了 1/3 与 1234/7（浮点展开 16 位）才闭上——这条变体就是那个补丁的护栏",
+    },
+    {
+        "id": "f3-04",
+        "label": "南纬西经不再取负",
+        "file": "src/localsearch/extract/media_meta.py",
+        "old": '    if direction in ("S", "W"):\n        degrees = -degrees',
+        "new": "    if False:\n        degrees = -degrees",
+        "tests": ["tests/unit/test_extract_media_meta.py"],
+        "expect": "test_southern_and_western_hemispheres_go_negative",
+        "why": "方向字母并进值里是这一层的设计；符号错了会让南半球的照片定位到北半球，"
+               "而正文里那串数字看起来完全正常",
+    },
+    {
+        "id": "f3-04",
+        "label": "XP* 不再从字节里解文字",
+        "file": "src/localsearch/extract/media_meta.py",
+        "old": "    if name in _XP_TAGS:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_extract_media_meta.py"],
+        "expect": "test_xp_title_is_decoded_from_utf16_bytes",
+        "why": "XP* 是中文照片里唯一可能带着中文的地方（Make/Model 是英文的）；"
+               "这条分支一没，中文标题就静默消失",
+    },
+    {
+        "id": "f3-04",
+        "label": "正文为空时不再出声",
+        "file": "src/localsearch/extract/media_meta.py",
+        "old": "        if not cap.has_body:\n            notes.append(",
+        "new": "        if False:\n            notes.append(",
+        "tests": ["tests/unit/test_extract_media_meta.py"],
+        "expect": "test_a_bare_png_is_an_empty_doc_with_a_warning",
+        "why": "一张没有元数据的图与一张元数据没被我们的名单覆盖的图，在库里长得一样；"
+               "不出声的话「搜不到」就没有线索",
+    },
+]
+
+
+def _git(args: list[str]) -> str:
+    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    return result.stdout.strip()
+
+
+def _check_preconditions(mutation: dict) -> pathlib.Path:
+    """拒绝在脏文件上动手，并确认那处改动匹配得上、且只匹配一处。"""
+    path = ROOT / str(mutation["file"])
+    dirty = _git(["status", "--porcelain", "--", str(mutation["file"])])
+    if dirty:
+        raise SystemExit(
+            f"拒绝跑：{mutation['file']} 有未提交的改动（{dirty!r}）。\n"
+            "这个工具会把源码改坏几秒钟再还原，文件本来就不干净的话分不清哪些是我的。\n"
+            "先提交或 stash 再跑。"
+        )
+    source = path.read_text(encoding="utf-8")
+    hits = source.count(str(mutation["old"]))
+    if hits != 1:
+        raise SystemExit(
+            f"变体过期：{mutation['label']} 在 {mutation['file']} 里匹配到 {hits} 处"
+            "（必须是 1）。\n"
+            "匹配 0 处说明那句代码已经被改过形——**这条变体验的东西可能已经不在了**，"
+            "要重新想一条；匹配多处说明它改不准。两种都不许「尽力而为」。"
+        )
+    return path
+
+
+def _run(mutation: dict) -> dict:
+    path = _check_preconditions(mutation)
+    source = path.read_text(encoding="utf-8")
+    mutated = source.replace(str(mutation["old"]), str(mutation["new"]), 1)
+
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "--no-header", *[str(one) for one in mutation["tests"]]]
+    try:
+        path.write_text(mutated, encoding="utf-8")
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
+    finally:
+        path.write_text(source, encoding="utf-8")
+
+    if path.read_text(encoding="utf-8") != source:
+        raise SystemExit(f"还原失败：{mutation['file']} 与原文不一致，请 git checkout 回来")
+
+    failed = sorted(
+        line.split("::")[-1].split()[0]
+        for line in result.stdout.splitlines() if line.startswith("FAILED")
+    )
+    # ⚠ 点名测试可能是**参数化**的，pytest 报的是 `名字[S--]`、`名字[W--]`。
+    # 第一版这里写的是 `str(...) in failed`（精确相等），于是"南纬西经"那条变体
+    # 明明红了 2 条却被判成**没红**——工具自己的假阴性，2026-10-16 首跑当场抓到。
+    # 所以按"名字本身"或"名字[参数]"两种形态认。
+    expect = str(mutation["expect"])
+    matched = [one for one in failed if one == expect or one.startswith(f"{expect}[")]
+
+    summary = [line for line in result.stdout.splitlines()
+               if "passed" in line or "failed" in line or "error" in line]
+    return {
+        "label": mutation["label"],
+        "why": mutation["why"],
+        "expect": expect,
+        "exit_code": result.returncode,
+        "failed": failed,
+        "matched": matched,
+        "summary": summary[-1].strip() if summary else "（没有读到 pytest 的汇总行）",
+        # 退出码 2 是收集期出错：那时所有测试一起红，看着像护栏其实什么都没验
+        "ok": result.returncode == 1 and bool(matched),
+        "collection_error": result.returncode not in (0, 1),
+    }
+
+
+#: `--self-test` 用的那条变体：**故意无效**的一处改动（加一句注释）。
+#:
+#: 为什么工具自己也要一条：它的失败形态是**静默的假绿**——判定逻辑一坏（第一版
+#: 就坏过一次，见 `_run` 里那段注释），它会对每一条变体都印"红"，然后照样印
+#: "5/5 条变体全部被抓到"、退出码 0。**那正是这个工具用来防别人的东西。**
+#: 喂它一条不生效的改动，它必须回"这条没红"——回不了就说明它自己的判定坏了。
+SELF_TEST: dict[str, object] = {
+    "id": "self-test",
+    "label": "故意无效的改动（只加一句注释）——它**必须**被判成「没红」",
+    "file": "src/localsearch/extract/media_meta.py",
+    "old": "        self._config = config",
+    "new": "        self._config = config  # self-test: 这行改动不改变任何行为",
+    "tests": ["tests/unit/test_extract_media_meta.py"],
+    "expect": "test_a_bare_png_is_an_empty_doc_with_a_warning",
+    "why": "喂给判定逻辑一条不生效的改动，它必须回「没红」；"
+           "回「红」就说明判定坏了，那么它报的每一个「红」都不可信",
+}
+
+
+def _self_test() -> int:
+    print("自检：喂一条**故意无效**的改动（只加一句注释），它必须被判成「没红」")
+    print("-" * 78)
+    outcome = _run(SELF_TEST)
+    print(f"    结果：pytest 退出码 {outcome['exit_code']}  {outcome['summary']}")
+    print(f"    红的测试：{outcome['failed'] or '（一条都没红）'}")
+    if outcome["exit_code"] != 0:
+        print("    ⚠ 退出码不是 0：一条不生效的改动不该让任何测试红，"
+              "先查这个工具跑的那个测试文件本身是不是绿的")
+        return 1
+    if outcome["ok"]:
+        print("    ⚠ 判定坏了：这条改动不改变任何行为，却被判成「红」——"
+              "那么它对真变体报的「红」也都不算数（点名测试没匹配上时最容易这样）")
+        return 1
+    print("    判定正常：不生效的改动被判成「没红」。")
+    print("-" * 78)
+    print("⚠ 自检只证明「判定逻辑能把没红的认出来」；")
+    print("  真变体的那一轮请照常跑（不带 --self-test）。")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="变体检查：改坏一处代码，点名的测试必须红")
+    parser.add_argument("--only", help="只跑这个 id 的变体（默认全跑）")
+    parser.add_argument("--list", action="store_true", help="只列出变体，不改任何文件")
+    parser.add_argument("--self-test", action="store_true",
+                        help="只跑自检：喂一条故意无效的改动，它必须被判成「没红」")
+    options = parser.parse_args()
+
+    if options.self_test:
+        return _self_test()
+
+    chosen = [one for one in MUTATIONS if not options.only or one["id"] == options.only]
+    if not chosen:
+        print(f"没有 id 为 {options.only!r} 的变体")
+        return 2
+    if options.list:
+        for one in chosen:
+            print(f"[{one['id']}] {one['label']}\n    点名测试：{one['expect']}"
+                  f"\n    理由：{one['why']}")
+        return 0
+
+    print(f"仓库根：{ROOT}")
+    print(f"变体 {len(chosen)} 条；每条都要：改坏 → pytest 退出码 1 → 点名的那条测试在红名单里")
+    print("=" * 78)
+
+    survived: list[dict] = []
+    for one in chosen:
+        outcome = _run(one)
+        mark = "红" if outcome["ok"] else "★没红★"
+        print(f"[{one['id']}] {outcome['label']}\n"
+              f"    点名测试：{outcome['expect']}\n"
+              f"    结果：{mark}  pytest 退出码 {outcome['exit_code']}  {outcome['summary']}")
+        if outcome["failed"]:
+            print(f"    红的测试（{len(outcome['failed'])} 条）："
+                  f"{', '.join(outcome['failed'][:6])}"
+                  f"{' …' if len(outcome['failed']) > 6 else ''}")
+        if outcome["collection_error"]:
+            print("    ⚠ 退出码不是 0/1：这是**收集期就出错**，所有测试一起红不算护栏")
+        if not outcome["ok"]:
+            survived.append(outcome)
+            print(f"    为什么要有这一条：{outcome['why']}")
+        print("-" * 78)
+
+    if survived:
+        print(f"⚠ {len(survived)}/{len(chosen)} 条变体**活下来了**（改坏了却没有测试红）：")
+        for one in survived:
+            print(f"    - {one['label']}")
+        print("这正是这个工具存在的理由：那些地方现在是**没有护栏**的。")
+        return 1
+
+    print(f"{len(chosen)}/{len(chosen)} 条变体全部被抓到——每一条都有测试盯着它。")
+    print("⚠ 这只说明「这些测试不是摆设」，不说明「实现是对的」（见文件头）。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
