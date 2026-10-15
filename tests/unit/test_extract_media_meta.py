@@ -710,12 +710,27 @@ def test_a_corrupt_exif_segment_is_not_a_failure(extractor, tmp_path):
 
 
 # ==============================================================================
-# 十、两条钉住模块文档的测试
+# 十、钉住模块文档第一段的测试
 # ==============================================================================
 
 
 def _boom(*_args, **_kwargs):
     raise AssertionError("load() 被调用了：这一层不该解码像素")
+
+
+def _assert_the_trap_is_armed(data: bytes, name: str) -> None:
+    """确认"桩接上了"——**真去 `.load()` 必须炸**。
+
+    ⚠ 这几条"不解码"的测试有一个**静默失效**的形态：桩打在 `Image.Image.load`
+    上，而 `TiffImageFile` / `WebPImageFile` 都**自己覆盖了 `load`**。要是哪个格式
+    的解码路径绕开了父类那个 `load`，桩就接不上，于是"没炸"会被读成"没解码"——
+    测试**永远是绿的，而它什么都没验**。所以每条都先正着炸一次。
+    （`2026-10-16` 实测：四个格式都接得上，因为两个覆盖版最后都走到
+    `ImageFile.load` 里那句 `pixel = Image.Image.load(self)`。）
+    """
+    with pytest.raises(AssertionError):
+        Image.open(io.BytesIO(data)).load()
+    assert name  # 只是为了在断言失败时看得出是哪条参数化的样本
 
 
 @pytest.mark.parametrize("name", ["a.jpg", "a.tif", "a.webp"])
@@ -728,17 +743,50 @@ def test_a_jpeg_is_never_decoded(tmp_path, monkeypatch, name):
     )
     path = _write(tmp_path, name, holder.getvalue())
     monkeypatch.setattr(Image.Image, "load", _boom)
+    _assert_the_trap_is_armed(holder.getvalue(), name)
     assert "Model: M" in MediaMetaExtractor(ExtractConfig()).extract(path).text
 
 
 def test_png_does_go_through_load_and_that_is_pillows_choice(tmp_path, monkeypatch):
-    """**PNG 是个例外**，而且这不是我们的选择：Pillow 的 `getexif()` 与 `text` 都调
-    `self.load()`（`tEXt` 可以排在 `IDAT` 后面，要读完所有块就得把图解出来）。
+    """**PNG 是个例外**，而触发它的是**我们**读 `.text` 那一行。
+
+    `PngImageFile.text` 只要 `_text is None` 就调 `self.load()`
+    （`PngImagePlugin.py:835`，注释写着 `tEXt` 可以排在 `IDAT` 后面），而
+    `_container_lines()` 对每种格式都取 `image.text`——所以每张 PNG 都会被解出来。
 
     钉住它是为了让模块文档第一段那句实话**不会**在下次重构时被悄悄抹掉：
-    谁要改成"PNG 也走不解码的路"，就该连着这段文档一起改。
+    谁要改成"PNG 也走不解码的路"，就该连着那段文档一起改。
     """
     path = png(tmp_path, text={"Software": "Stable Diffusion"})
     monkeypatch.setattr(Image.Image, "load", _boom)
+    with open(path, "rb") as handle:          # 桩接没接上：拿盘上那份真字节正着试一次
+        _assert_the_trap_is_armed(handle.read(), "shot.png")
     with pytest.raises(AssertionError):
         MediaMetaExtractor(ExtractConfig()).extract(path)
+
+
+def test_png_getexif_only_loads_without_an_exif_chunk(tmp_path, monkeypatch):
+    """模块文档第一段的**另一半**：`PngImageFile.getexif()` 只在没有 `eXIf` 块时解码。
+
+    源码就一句 `if "exif" not in self.info: self.load()`（`PngImagePlugin.py:1097`）。
+    初稿把 `getexif()` 与 `text` 写成含糊的一句"都调了 `self.load()`"，**在带 `eXIf`
+    块的 PNG 上是假的**——这条钉住"块在时它真懒"，也就是说明"PNG 会解码"确实有两个
+    来源，只堵 `getexif()` 那条不够。
+    """
+    # ⚠ 样本必须在**打桩之前**造好：`Image.save()` 自己就会调 `load()`
+    with_exif = png(tmp_path, "with.png", text={"Software": "S"},
+                    exif=_exif_blob(ifd0={"Model": "M"}))
+    without = png(tmp_path, "without.png", text={"Software": "S"})
+    monkeypatch.setattr(Image.Image, "load", _boom)
+
+    # 块在时 `getexif()` 不碰像素；块不在时它自己去解
+    Image.open(with_exif).getexif()
+    with pytest.raises(AssertionError):
+        Image.open(without).getexif()
+
+    # 而 `text` 两条路都解——所以整条抽取在任何一种 PNG 上都会解码
+    for path in (with_exif, without):
+        with pytest.raises(AssertionError):
+            getattr(Image.open(path), "text", None)
+
+

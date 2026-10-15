@@ -11,15 +11,28 @@ r"""图片的元数据（`F3-04`）：文件里除了文件名之外还带着的
 `2026-10-16` 用一个桩验过（`test_a_jpeg_is_never_decoded`：把 `Image.Image.load`
 换成抛异常的桩，JPEG / TIFF / WebP / AVIF 的抽取照常走完）。
 
-⚠ **PNG 不成立**：Pillow 的 `PngImageFile.getexif()` 与它的 `text` 属性里都调了
-`self.load()`（同一个桩在 PNG 上当场炸掉，`test_png_does_go_through_load_and_that_is_pillows_choice`
-把这条钉着）。原因是 PNG 的 `tEXt` / `iTXt` / `zTXt` 块**可以排在 `IDAT` 后面**，
-要确定没有更多文字就必须把整张图解出来。三条推论，都得说清楚：
+⚠ **PNG 不成立**，而且**触发它的那一行是我们自己**：`PngImageFile.text` 只要
+`_text is None` 就调 `self.load()`（`PngImagePlugin.py:835`），而 `_text` 在读完
+`IDAT` 之前一直是 `None`——因为 `tEXt` / `iTXt` / `zTXt` 块**可以排在 `IDAT` 后面**，
+要确定"没有更多文字了"就必须把整张图解出来。`_container_lines()` 对每种格式都取
+`image.text`，所以**每张 PNG 都会被解出来**，不管它带不带 EXIF 块。
+（同一个桩在 PNG 上当场炸掉，`test_png_does_go_through_load_and_that_is_pillows_choice`
+把这条钉着。）
 
-1. **一张大 PNG 的抽取成本与解码它相当**（时间与内存）。这不是我们的选择，是上游的
-   实现。要绕开只能自己扫块（PNG 的块结构很简单），代价是 PNG 会走一条**自己的**
-   EXIF 路径（`info["exif"]` + `Image.Exif().load()` 实测可行、不触发 `load()`），
-   而两条路径迟早会在"Pillow 怎么合并 eXIf"这件事上分岔——**v1 不绕**，把代价写在这里。
+⚠ **另一半不那么直白**：`PngImageFile.getexif()` 只在**没有 `eXIf` 块**时才调
+`self.load()`——源码就一句 `if "exif" not in self.info: self.load()`
+（`PngImagePlugin.py:1097`），块已经读出来时它是真懒的。所以"PNG 会解码"这件事
+有两个来源，**只堵住 `getexif()` 那条不够**，`test_png_getexif_only_loads_without_an_exif_chunk`
+钉着这一半。初稿把这两条写成了含糊的一句"都调了 `self.load()`"，
+而它在**带 `eXIf` 块的 PNG 上是假的**（`2026-10-16` 实测，见 `E34`）。
+
+三条推论，都得说清楚：
+
+1. **一张大 PNG 的抽取成本与解码它相当**（时间与内存）。触发它的是我们读 `.text`
+   那一行——**想要容器文本就得付这笔钱**，而 PNG 的块结构很简单，真要不付只有自己
+   扫块：代价是 PNG 走一条**自己的** EXIF 路径（`info["exif"]` + `Image.Exif().load()`
+   实测可行、不触发 `load()`），而两条路径迟早会在"Pillow 怎么合并 eXIf"这件事上
+   分岔——**v1 不绕**，把代价写在这里。
 2. **`.lsearchignore` 默认把 `*.png` 标成只记名字**，所以默认规则下这笔钱不花；
    要花是因为用户自己改了规则去索引 PNG。改之前先看这一条。
 3. **解压炸弹那道闸门在 PNG 上是真的在防**，在 JPEG 那几类上是预防性的（`P9` 真要
@@ -495,8 +508,9 @@ def _failed(kind: str, exc: BaseException) -> ParseFailed:
 class MediaMetaExtractor:
     """图片 → 元数据字段（`F3-04`）。
 
-    JPEG / TIFF / WebP / AVIF 上一行像素都不解；**PNG 除外**（Pillow 那一侧
-    `getexif()` 与 `text` 都会 `load()`），代价与不绕它的理由写在模块文档第一段。
+    JPEG / TIFF / WebP / AVIF 上一行像素都不解；**PNG 除外**（`PngImageFile.text`
+    永远要 `load()`，而 `_container_lines()` 取的正是它），代价与不绕它的理由写在
+    模块文档第一段。
     """
 
     name = "media_meta"
