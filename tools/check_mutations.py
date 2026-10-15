@@ -310,6 +310,54 @@ MUTATIONS: list[dict[str, object]] = [
                "那种记录最难查，因为每一层都觉得自己没错（`base.py` 里"
                "“注册了但返回空正文”是同一个坑的另一种形态）",
     },
+    {
+        "id": "f3-06",
+        "label": "`--check` 不再报“盘上有、清单里没有”的文件",
+        "file": "tools/make_fixtures.py",
+        "old": "    for extra in stray(samples):",
+        "new": "    for extra in []:",
+        "tests": ["tests/unit/test_fixtures.py"],
+        "expect": "test_a_stray_file_in_the_directory_is_reported",
+        "why": "自检只查“清单里的都在盘上”的话，把一个改坏了的旧文件留在目录里就能让"
+               "它保持绿——那正是两份真相。反之，这一半也是“手改过目录”唯一会被"
+               "抓到的地方（清单里那条改了名，它就成了多余的那一个）",
+    },
+    {
+        "id": "f3-06",
+        "label": "第一次生成的文件被说成“同长不一致”而不是“新建”",
+        "file": "tools/make_fixtures.py",
+        "old": "        note = f\"新建（{len(data)} 字节，{_digest(data)}）\" if before is None else _same(before, data)",
+        "new": "        note = _same(before or b\"\", data)",
+        "tests": ["tests/unit/test_fixtures.py"],
+        "expect": "test_write_says_what_it_newly_made",
+        "why": "这条消息印给人看，而 0 → N 字节的“不一致”读起来像“这文件被人改小了”，"
+               "实际是“第一次生成”。判据是同一件事（比字节），说错方向会把人带偏",
+    },
+    {
+        "id": "f3-06",
+        "label": "清单里 `broken.pdf` 的 `raises` 写成别的异常族",
+        "file": "tests/fixtures/MANIFEST.toml",
+        "old": "builder = \"broken_pdf\"\nkind = \"broken\"\nextractor = \"office\"\nraises = \"ParseFailed\"",
+        "new": "builder = \"broken_pdf\"\nkind = \"broken\"\nextractor = \"office\"\nraises = \"FileUnreadable\"",
+        "tests": ["tests/unit/test_fixtures.py"],
+        "expect": "test_a_broken_sample_raises_the_declared_error",
+        "why": "“坏文件按名报错”是这份样本集的用处所在：`raises` 写错一族就等于把"
+               "这一条样本的判据换成了另一件事。⚠ 它同时也是清单**自己**被验的证明"
+               "——清单不是文档，是这份样本集的真相来源，写错必须红",
+    },
+    {
+        "id": "f3-06",
+        "label": "五份图片样本共用的那个 EXIF 字段改了名",
+        "file": "tools/make_fixtures.py",
+        "old": "PHOTO_FIELD = \"fixture photo\"",
+        "new": "PHOTO_FIELD = \"fixture photos\"",
+        "tests": ["tests/unit/test_fixtures.py"],
+        "expect": "test_the_bytes_on_disk_are_what_the_builder_makes_now",
+        "why": "builder 改了而没重跑生成器，是 fixtures 这一类“文件本身就是被测物”"
+               "最容易出的错：改了 builder 的人手上是绿的（他跑的是新字节），"
+               "clone 出来的人拿到的是旧文件。这一条把“提交的字节 = 生成器现在的字节”"
+               "钉死（`--check` 是同一个判据的命令行出口）",
+    },
 ]
 
 

@@ -1,0 +1,320 @@
+# ==============================================================================
+# tests/fixtures/ 的清单（F3-06）
+# ==============================================================================
+# 这份文件**是** fixtures 的真相来源，三处读它：
+#   - `tools/make_fixtures.py` 按 `builder` 造字节、写进 `file` 指的位置；
+#   - `tests/unit/test_fixtures.py` 按同一条记录**验**这些字节（行为 + 逐字节一致）；
+#   - 人读它，看"每种格式最小样本长什么样"。
+#
+# ⚠ **不要手改目录里的文件**，改这份清单 + 对应的 builder，然后跑
+# `uv run python tools/make_fixtures.py`。改了字节不重跑生成器，自检会红
+# （它比的是"提交上去的字节 = 生成器现在造出来的字节"）。
+#
+# 字段：
+#   name        人读的名字，也是测试 id 的前半段（`<name>` 出现在 pytest 的参数里）
+#   file        相对 tests/fixtures/ 的路径
+#   builder     tools/make_fixtures.py 里 BUILDERS 的键
+#   kind        good（这一类 v1 该做，且这个文件能出正文）/ broken（这一个文件坏了）
+#   extractor   该由哪个提取器接走（`build_registry()` 里那个元组的名字）
+#   text_has    kind=good：正文里必须逐条出现的片段，**按在正文里出现的先后写**
+#               （自检会按这个顺序逐条往后找，所以顺序写反了一样红）
+#   title_has   kind=good：`ExtractedDoc.title` 里必须出现的片段（省略即不检查 `title`）
+#   title_in_text
+#               kind=good、写了 `title_has` 才有意义：那串字是不是**也**该出现在正文里。
+#               默认不出现。邮件是例外——标记行那一组里就写着主题（`【邮件】主题：…`），
+#               这是有意的，所以 `.eml` / `.msg` 明写 `title_in_text = true`；
+#               HTML 的 `<title>` 相反，它只该进 `title`。
+#   meta        kind=good：`ExtractedDoc.meta` 里必须相等的键值（省略即不检查）
+#   raises      kind=broken：必须抛的异常类名
+#   note        为什么它算"最小"、以及这条样本钉的是哪一件事
+#
+# 样本按**表示法**（字节长什么样）分组，不按扩展名：`.html` / `.htm` / `.xhtml`
+# 是同一份字节的三个后缀，给每个后缀都存一份等于把同一件事抄三遍。
+# 后缀到提取器的**逐条**认领由 `tests/unit/test_extract_web_mail.py` 那几组
+# "恰好 N 个扩展名"的测试盯着，不在这里重做一遍。
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# plaintext：文本 / 代码
+# ------------------------------------------------------------------------------
+
+[[sample]]
+name = "plaintext/txt"
+file = "good/minimal.txt"
+builder = "plaintext_txt"
+kind = "good"
+extractor = "plaintext"
+text_has = ["hello, fixture", "你好，fixture。"]
+meta = { encoding = "utf-8" }
+note = """
+最小的纯文本：两行、UTF-8、**超过 32 字节**。
+超过 `SHORT_BYTES` 那条线是有意的——短数据那一档跳过编码探测器、直接认
+`gb18030`（见 `base.decode_bytes()` 的文档），样本落在那一档就会顺带把那条
+取舍当成"这个样本的性质"。两行里一行 ASCII、一行中文，钉的是"同一份文件里
+两种字符都原样回来"。
+"""
+
+[[sample]]
+name = "plaintext/no-extension"
+file = "good/README"
+builder = "plaintext_no_ext"
+kind = "good"
+extractor = "plaintext"
+text_has = ["fixture README"]
+meta = { encoding = "utf-8" }
+note = """
+**没有扩展名**的文本。`PlaintextExtractor.supports()` 对空扩展名一律返回真
+（`README` / `Makefile` / `.gitignore` 这类文件的落点），所以这一条钉的是**兜底那
+一支**——它与名单内扩展名走的是同一个 `extract()`，但进门的理由完全不同。
+"""
+
+[[sample]]
+name = "plaintext/no-extension-binary"
+file = "broken/binary"
+builder = "binary_no_ext"
+kind = "broken"
+extractor = "plaintext"
+raises = "BinaryContent"
+note = """
+**没有扩展名、内容是二进制**（含 NUL）。它与上一条是同一支兜底的两个结局：
+`looks_binary()` 为真就抛 `BinaryContent`（失败，进报表），不再往下解。
+⚠ 有扩展名但不在名单里的文件走的是 `UnsupportedFormat`、**不嗅内容**，所以这份
+样本**故意不带扩展名**——带上就不是这一支了。
+"""
+
+# ------------------------------------------------------------------------------
+# office：pdf / docx / xlsx / pptx
+# ------------------------------------------------------------------------------
+
+[[sample]]
+name = "office/pdf"
+file = "good/minimal.pdf"
+builder = "office_pdf"
+kind = "good"
+extractor = "office"
+text_has = ["fixture pdf text"]
+meta = { format = "pdf" }
+note = """
+**一页、一行字**的 PDF（PyMuPDF 造）。
+`no_new_id=True` 是必须的：不加的话 MuPDF 每次保存都写一个按时间算的 `/ID`，
+同一份输入两次的字节就不同（实测，见 `PROGRESS.md` §4 P3 的 `F3-06` 记录）。
+"""
+
+[[sample]]
+name = "office/docx"
+file = "good/minimal.docx"
+builder = "office_docx"
+kind = "good"
+extractor = "office"
+text_has = ["fixture docx text"]
+meta = { format = "docx" }
+note = "**一段话**的 `.docx`。docx **不加**标记行（它没有页的概念，编一个出来就是伪造）。"
+
+[[sample]]
+name = "office/xlsx"
+file = "good/minimal.xlsx"
+builder = "office_xlsx"
+kind = "good"
+extractor = "office"
+text_has = ["fixture xlsx text"]
+meta = { format = "xlsx" }
+note = """
+**一个工作表、一个格子**的 `.xlsx`。值写成字符串而不是数字：数字那一档要经过
+`str()`，而"数字格式不复刻"是记在案的取舍（`PROGRESS.md` §4 P3「遗留」第 8 条），
+样本写字符串就不把那条取舍混进这条样本的意思里。
+"""
+
+[[sample]]
+name = "office/pptx"
+file = "good/minimal.pptx"
+builder = "office_pptx"
+kind = "good"
+extractor = "office"
+text_has = ["fixture pptx text"]
+meta = { format = "pptx" }
+note = "**一张幻灯片、一个文本框**的 `.pptx`。标记行 `【第 1 张幻灯片】` 照出，所以正文比别处多一行。"
+
+[[sample]]
+name = "office/pdf-broken"
+file = "broken/broken.pdf"
+builder = "broken_pdf"
+kind = "broken"
+extractor = "office"
+raises = "ParseFailed"
+note = "有 `%PDF-` 头、后面是垃圾字节——**头对、内容坏**，MuPDF 在读的时候才炸。"
+
+[[sample]]
+name = "office/docx-broken"
+file = "broken/broken.docx"
+builder = "broken_docx"
+kind = "broken"
+extractor = "office"
+raises = "ParseFailed"
+note = "zip 的本地文件头写了一半就断了——`zipfile.BadZipFile` 那一族的样本。"
+
+# ------------------------------------------------------------------------------
+# web_mail：html / mht / eml / msg
+# ------------------------------------------------------------------------------
+
+[[sample]]
+name = "web_mail/html"
+file = "good/minimal.html"
+builder = "web_html"
+kind = "good"
+extractor = "web_mail"
+text_has = ["fixture html text"]
+title_has = "fixture html subject"
+note = """
+**一个 `<p>`** 的 HTML。`<head>` 与 `<!DOCTYPE html>` 都留着——它们正是
+"取文本之前必须跳过的四种节点"那一条的相邻形态（`<title>` 与 Doctype）。
+`title_has` 钉的是那一条的另一半：`<title>` 里的字去 `title`，**不出现在正文里**
+（只钉 `text_has` 的话，"标签连同标题一起漏进正文"照样是绿的）。
+⚠ 一段裸 HTML 不读 `<meta charset>`（编码只有 `decode_bytes` 一个真相来源）。
+"""
+
+[[sample]]
+name = "web_mail/mht"
+file = "good/minimal.mht"
+builder = "web_mht"
+kind = "good"
+extractor = "web_mail"
+text_has = ["fixture mht text"]
+title_has = "fixture mht subject"
+note = """
+最小的「单个文件网页」：`multipart/related`、一个 `text/html` 部分、**带
+`Subject`**（它进 `title`）。正文走 quoted-printable——不是因为需要，而是因为
+`Content-Transfer-Encoding` 是这种容器**必然**会写的一行，省掉它这份样本就不再
+是"真实的 `.mht` 形状"了。它**没有**邮件头那一组标记行（`Subject` 只进 `title`）。
+"""
+
+[[sample]]
+name = "web_mail/eml"
+file = "good/minimal.eml"
+builder = "web_eml"
+kind = "good"
+extractor = "web_mail"
+text_has = ["【邮件】", "fixture eml text"]
+title_has = "fixture eml subject"
+title_in_text = true
+note = """
+**一封最小邮件**：`From` / `To` / `Subject` / 一段 `text/plain` 正文。正文是
+**纯文本**不是 HTML——`text/plain` 优先那一条只有在有 HTML 备选时才谈得上，
+这份样本不掺那一档。标记行那一组（发件人 / 收件人 / 主题）会进正文。
+"""
+
+[[sample]]
+name = "web_mail/msg"
+file = "good/minimal.msg"
+builder = "web_msg"
+kind = "good"
+extractor = "web_mail"
+text_has = ["【邮件】", "fixture msg text"]
+title_has = "fixture msg subject"
+title_in_text = true
+note = """
+**真的 OLE 复合文档**（`extract_msg.ole_writer.OleWriter` 写的，不是打桩），
+按 MS-OXMSG 只放必需的那几条属性（`001A` 类别、`0037` 主题、`0C1A` 发件人、
+`1000` 正文）。`001A = IPM.Note` 是**必需**的：缺了它，`openMsg` 会判"这不是一封
+MSG"，而那个报错会退化成"附件读不出来"，很难查。
+⚠ 这份 builder 与 `tests/unit/test_extract_web_mail.py` 里那个**参数化**的
+builder 是两份（那一份要造附件、内嵌邮件、只有 HTML 的正文……），见「遗留」。
+"""
+
+[[sample]]
+name = "web_mail/mht-broken"
+file = "broken/broken.mht"
+builder = "broken_mht"
+kind = "broken"
+extractor = "web_mail"
+raises = "ParseFailed"
+note = "**没有任何 MIME 头**的 `.mht`——这种格式的合法性就在结构上，没有头就不是 `.mht`。"
+
+[[sample]]
+name = "web_mail/msg-broken"
+file = "broken/broken.msg"
+builder = "broken_msg"
+kind = "broken"
+extractor = "web_mail"
+raises = "ParseFailed"
+note = "**不是 OLE2**（`InvalidFileFormatError` 那一族）。⚠ 另一族（是 OLE2 但扇区链坏了、`olefile.OleFileError`）没法用固定字节表达——它要一份**真的** OLE2 再截断，那是 `test_extract_web_mail.py` 里参数化样本的活。"
+
+# ------------------------------------------------------------------------------
+# media_meta：五种图片容器
+# ------------------------------------------------------------------------------
+#
+# 五份样本共用同一份元数据（一个 `ImageDescription`），所以正文期望值逐字相同。
+# ⚠ **值只能是 ASCII**：`Image.Exif.tobytes()` 把 `str` 类型字段里的非 ASCII
+# 换成 `?`（`E34` 第 5 条实测），中文在 `XP*` 那族字节字段里，不在这里。
+
+[[sample]]
+name = "media_meta/jpeg"
+file = "good/minimal.jpg"
+builder = "image_jpeg"
+kind = "good"
+extractor = "media_meta"
+text_has = ["ImageDescription: fixture photo"]
+meta = { format = "JPEG", width = 8, height = 8 }
+note = "8×8 的纯色 JPEG + 一个 `ImageDescription`。尺寸取 8 是为了让文件小到能一眼看完。"
+
+[[sample]]
+name = "media_meta/tiff"
+file = "good/minimal.tif"
+builder = "image_tiff"
+kind = "good"
+extractor = "media_meta"
+text_has = ["ImageDescription: fixture photo"]
+meta = { format = "TIFF", width = 8, height = 8 }
+note = """
+8×8 的 TIFF + 同一个字段。⚠ 这份样本**不做**
+`Orientation=6`（TIFF 在它下面 `image.size` 是交换过的，`E34` 第 5 条）——
+那一条属于"我们的处置"（`media_meta` 报的是文件头里的尺寸，不跟着转），
+钉它的是 `test_extract_media_meta.py`，不是这份最小样本。
+"""
+
+[[sample]]
+name = "media_meta/png"
+file = "good/minimal.png"
+builder = "image_png"
+kind = "good"
+extractor = "media_meta"
+text_has = ["ImageDescription: fixture photo", "Description: fixture png text"]
+meta = { format = "PNG", width = 8, height = 8 }
+note = """
+8×8 的 PNG，**两个来源都带上**：`eXIf` 块里的 `ImageDescription` 与 `tEXt` 块里的
+`Description`。五份图片样本里只有这一份同时走两条路——PNG 是唯一"容器文本"
+（`tEXt`/`iTXt`/`zTXt`）与 EXIF 并存、且两条路都会触发的格式。
+"""
+
+[[sample]]
+name = "media_meta/webp"
+file = "good/minimal.webp"
+builder = "image_webp"
+kind = "good"
+extractor = "media_meta"
+text_has = ["ImageDescription: fixture photo"]
+meta = { format = "WEBP", width = 8, height = 8 }
+note = "8×8 的 WebP + 同一个字段。Pillow 把 EXIF 写进 `EXIF` 块，读回来走与 JPEG 同一条 `getexif()`。"
+
+[[sample]]
+name = "media_meta/avif"
+file = "good/minimal.avif"
+builder = "image_avif"
+kind = "good"
+extractor = "media_meta"
+text_has = ["ImageDescription: fixture photo"]
+meta = { format = "AVIF", width = 8, height = 8 }
+note = "8×8 的 AVIF + 同一个字段。本机 Pillow 有 avif **写**支持（实测能写出来），所以这份样本不是「预留」的。"
+
+[[sample]]
+name = "media_meta/jpeg-broken"
+file = "broken/broken.jpg"
+builder = "broken_jpg"
+kind = "broken"
+extractor = "media_meta"
+raises = "ParseFailed"
+note = """
+`FFD8` 开头、后面只有半截头——截断的头的样本（那一族是**光秃秃的
+`OSError`**，`E34` 第 3 条，少接一族就以未捕获异常冒出批量层）。
+⚠ 它**不是** "坏 EXIF"：坏 EXIF 的图片照收、只留警告（`E34` 第 4 条），
+所以那一条没法用一份固定字节表达（要真造一张图再手工把 EXIF 弄坏）。
+"""

@@ -1,0 +1,12 @@
+MIME-Version: 1.0
+Subject: fixture mht subject
+Content-Type: multipart/related; boundary="----=_NextPart_000"
+Content-Location: http://example.com/page.html
+
+------=_NextPart_000
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><title>fixture mht subject</title></head><body><p>fixture mht t=
+ext</p></body></html>
+------=_NextPart_000--

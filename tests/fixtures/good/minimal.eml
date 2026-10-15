@@ -1,0 +1,9 @@
+From: fixture sender <from@example.com>
+To: fixture to <to@example.com>
+Subject: fixture eml subject
+Date: Thu, 15 Oct 2026 01:30:00 +0800
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+fixture eml text

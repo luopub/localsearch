@@ -26,13 +26,40 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
+# 测试样本（tests/fixtures/）**一个字节都不许被 git 动**。
+#
+# 这是 `F3-06` 加的，理由与上面那两行同源但更强：那一批样本的判据是"提交上去的
+# 字节 = 生成器现在造出来的字节"（`tools/make_fixtures.py --check`），行尾被改写
+# 就等于判据失效。麻烦的是 `.mht` / `.eml` / `.html` **看着像文本**，`text=auto`
+# 按内容判定会把它们当文本转成 LF，而 `.gitattributes` 的 `binary` 关键词只在
+# 文件**真的**是二进制时才有意义——所以这里用 `-text`（显式声明"不是文本"），
+# 不看内容、一律不碰。
+#
+# ⚠ 它必须写在 `* text=auto eol=lf` **之后**（gitattributes 里后出现的覆盖先出现的）。
+tests/fixtures/** -text
+
+# 唯一的例外：清单本身是**给人读、要出 diff**的文本文件，不该跟着一起变二进制。
+# （它是清单不是样本，判据"提交的字节 = 生成的字节"管的是 `file` 指的那些文件。）
+tests/fixtures/MANIFEST.toml text eol=lf
+
 # 显式标为二进制，禁止任何行尾转换
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
+*.tif binary
+*.tiff binary
+*.webp binary
+*.avif binary
+*.avifs binary
 *.ico binary
 *.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.msg binary
+*.mht binary
+*.eml binary
 *.woff binary
 *.woff2 binary
 *.onnx binary

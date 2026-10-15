@@ -1,0 +1,3 @@
+hello, fixture
+你好，fixture。这一行是为了让字节数超过 SHORT_BYTES 那条线，
+好让编码那一档走探测器而不是语料先验。
