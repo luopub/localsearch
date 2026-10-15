@@ -45,8 +45,16 @@ MFT 报的那些路径全都"只有 MFT 有"。所以报告里把 scandir 的「
 
 ---- 用法（仓库根执行）-----------------------------------------------------
 
-    # 真机验收：必须在管理员终端里。不给 roots 就用 config/config.toml 的 [paths] roots
-    PYTHONUTF8=1 ./.venv/Scripts/python.exe -u tools/verify_mft_parity.py --log 报告.md
+    # 真机验收：必须在**管理员终端**里。不给 roots 就用 config/config.toml 的 [paths] roots
+    #
+    # ⚠ `环境变量=值 命令` 这种**前置赋值只有 cmd.exe 与 bash 认**，PowerShell 会把它
+    #   当成命令名（"无法将 PYTHONUTF8=1 项识别为 cmdlet"，然后什么都不跑）。
+    #   PowerShell（本机默认 shell；路径写正斜杠，免得在非 raw 文档串里写反斜杠转义）：
+    #       $env:PYTHONUTF8 = "1"
+    #       ./.venv/Scripts/python.exe -u tools/verify_mft_parity.py D:/work --log 报告.md
+    #   cmd.exe / bash：
+    #       PYTHONUTF8=1 ./.venv/Scripts/python.exe -u tools/verify_mft_parity.py D:/work --log 报告.md
+    #
     ... tools/verify_mft_parity.py D:/work C:/Windows --json > 报告.json
     ... tools/verify_mft_parity.py D:/work --progress 200000     # 长跑时的进度（stderr）
 
