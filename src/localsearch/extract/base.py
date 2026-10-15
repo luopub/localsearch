@@ -432,7 +432,7 @@ def extract_file(
     registry: Registry[Extractor],
     config: ExtractConfig,
 ) -> ExtractedDoc:
-    """派发 + 提取。**单个文件这一档的入口**（批量那一档在 `F3-07`）。
+    """派发 + 提取。**单个文件这一档的入口**（批量那一档是 `batch.extract_many()`）。
 
     这里只做一件事：没人认领时把 `None` 变成一个带原因的 `UnsupportedFormat`。
     `config` 目前只递下去（提取器各自持有它），保留这个参数是因为调用点需要一个

@@ -4,6 +4,17 @@
 切片不在这一层——提取器只负责把正文端出来，怎么切是 `chunk/` 的事。
 
 ------------------------------------------------------------------------------
+两个入口，不是两个层次
+------------------------------------------------------------------------------
+
+- **单个文件**：`extract_file()`（`base.py`）——派发 + 提取，出事就抛。
+- **一批文件**：`extract_many()`（`batch.py`）——同一个派发，外加"一个文件出事不停下
+  整轮"，每个文件换回一条 `Outcome`（`A6`，`F3-07`）。
+
+`batch` 不是"更高一层"：它是同一件事的**批处理形态**，除了接异常与计数什么都没做
+（不写库、不切片）。`P4` 的索引循环直接用它。
+
+------------------------------------------------------------------------------
 装配只在这个文件里
 ------------------------------------------------------------------------------
 
@@ -19,6 +30,7 @@ from __future__ import annotations
 
 from localsearch.core.registry import Registry
 
+from .batch import ERROR_MSG_MAX, Outcome, Tally, extract_many
 from .base import (
     BinaryContent,
     Decoded,
@@ -40,6 +52,7 @@ from .base import (
 )
 
 __all__ = [
+    "ERROR_MSG_MAX",
     "BinaryContent",
     "Decoded",
     "ExtractConfig",
@@ -47,12 +60,15 @@ __all__ = [
     "ExtractedDoc",
     "Extractor",
     "FileUnreadable",
+    "Outcome",
     "ParseFailed",
+    "Tally",
     "UnsupportedFormat",
     "build_registry",
     "decode_bytes",
     "ext_of",
     "extract_file",
+    "extract_many",
     "find_extractor",
     "looks_binary",
     "mime_of",

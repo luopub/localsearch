@@ -205,6 +205,111 @@ MUTATIONS: list[dict[str, object]] = [
         "why": "规则 4。空片会进 FTS、进向量：白占一行，还带回一个恒不命中的向量"
                "（它连「最不像」都算不上，就是没有内容）",
     },
+    {
+        "id": "f3-07",
+        "label": "遇到失败就停下整轮（`A6` 的字面反面）",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "            yield Outcome(path, error=exc)",
+        "new": "            return",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_one_outcome_per_path_in_input_order",
+        "why": "`A6` 就是这一行在守。停下时症状最难查的一种是**没有任何报错**："
+               "这一轮“跑完了”、退出码 0、报表干净，而它后面那些文件一个都没处理"
+               "（`R4` 那条风险的形态：权限拒绝 / 长路径 / 符号链接环上必然会踩到）",
+    },
+    {
+        "id": "f3-07",
+        "label": "第二道防线收窄成只接 `ExtractError`",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        except Exception as exc:  # noqa: BLE001 - 第二道防线，见模块文档",
+        "new": "        except ExtractError as exc:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_an_unexpected_exception_is_caught_and_marked",
+        "why": "看着更“精确”的写法。`F3-02` / `F3-03` / `F3-04` 每一轮都踩到过"
+               "“异常族名单里少列一个”（库升级就会改它），所以判据不回头依赖提取器；"
+               "漏一个的代价不是少收一个文件，是整轮索引白跑",
+    },
+    {
+        "id": "f3-07",
+        "label": "连 `BaseException` 也接（Ctrl-C 被吃掉）",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        except Exception as exc:  # noqa: BLE001 - 第二道防线，见模块文档",
+        "new": "        except BaseException as exc:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_ctrl_c_is_not_swallowed",
+        "why": "更“彻底”的写法。接住 `KeyboardInterrupt` 的症状是“按了 Ctrl-C 没反应、"
+               "而且一点提示都没有”——全盘跑起来时那是没有逃生口的",
+    },
+    {
+        "id": "f3-07",
+        "label": "把“这一类不做”也写进 `error_msg`",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        if self.error is None or isinstance(self.error, UnsupportedFormat):",
+        "new": "        if self.error is None:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_unsupported_formats_stay_out_of_the_failure_report",
+        "why": "`error_msg` 非空是“失败报表”的唯一判据，而全盘上 `.db` / `.dat` / `.exe` "
+               "多得是。填满之后真坏的文件淹在噪音里——正是 `base.UnsupportedFormat` "
+               "那份表格里写明不要做的事",
+    },
+    {
+        "id": "f3-07",
+        "label": "`UnsupportedFormat` 降级成 `error`",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        if isinstance(self.error, UnsupportedFormat):\n            return STATUS_SKIPPED",
+        "new": "        if False:\n            return STATUS_SKIPPED",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_each_kind_of_failure_comes_back_as_a_reason",
+        "why": "同上一条的另一半：这一格决定 `P4` 把它写进 `files` 的**哪一档**。"
+               "记成 `error` 之后，报表里的噪音与上一条一样多，但连“文件名照搜”这层"
+               "说明也没有了",
+    },
+    {
+        "id": "f3-07",
+        "label": "`error_msg` 不再折成一行",
+        "file": "src/localsearch/extract/batch.py",
+        "old": '    flat = " ".join(text.split())',
+        "new": "    flat = text",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_error_msg_is_one_short_line_with_the_class_name",
+        "why": "这一格会进表格、进日志行，而库报的原文里常有换行（PDF / OOXML 的"
+               "解析错误尤其）。带换行的一句能把一整屏输出搅乱，排错的人反而看不到重点",
+    },
+    {
+        "id": "f3-07",
+        "label": "`error_msg` 不再截断",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "    if len(flat) <= ERROR_MSG_MAX:",
+        "new": "    if True:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_error_msg_is_one_short_line_with_the_class_name",
+        "why": "上限与 `base.meta_str` 同一个理由（那一行是给人看的），只多一个 `...` "
+               "标记。不截断时一行 `error_msg` 能是几 KB，`status` / 报表按行排版就全乱了",
+    },
+    {
+        "id": "f3-07",
+        "label": "未预期的异常不再单列计数",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        if outcome.unexpected is not None:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_an_unexpected_exception_is_caught_and_marked",
+        "why": "`unexpected` 是那三个提取器模块“异常族名单漏了一个”的**唯一侦测器**。"
+               "混进“文件坏了”里就等于没有：报表上两者长得一样，于是漏掉的那一族"
+               "永远不会有人去补",
+    },
+    {
+        "id": "f3-07",
+        "label": "`Outcome` 的不变量不再把关",
+        "file": "src/localsearch/extract/batch.py",
+        "old": "        if sum(given) != 1:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_extract_failure_isolation.py"],
+        "expect": "test_outcome_refuses_anything_but_exactly_one_of_the_three",
+        "why": "“一个都没有”的 `Outcome` 流到 `P4` 会写成一行**没有原因的失败**——"
+               "那种记录最难查，因为每一层都觉得自己没错（`base.py` 里"
+               "“注册了但返回空正文”是同一个坑的另一种形态）",
+    },
 ]
 
 
