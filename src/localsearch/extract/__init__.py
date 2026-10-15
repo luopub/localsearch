@@ -27,6 +27,7 @@ from .base import (
     Extractor,
     ExtractError,
     FileUnreadable,
+    ParseFailed,
     UnsupportedFormat,
     decode_bytes,
     ext_of,
@@ -46,6 +47,7 @@ __all__ = [
     "ExtractedDoc",
     "Extractor",
     "FileUnreadable",
+    "ParseFailed",
     "UnsupportedFormat",
     "build_registry",
     "decode_bytes",
@@ -73,12 +75,12 @@ def build_registry(config: ExtractConfig) -> Registry[Extractor]:
       写下来是为了**将来加 OCR / 多模态提取器时**有个明确的插入位置：新来的
       **必须**排在它想覆盖的那些后面，或者把名单改窄。
     """
-    from . import plaintext
+    from . import office, plaintext
 
     registry: Registry[Extractor] = Registry("extractor")
-    # P3 逐块落地：`F3-02` 加 office、`F3-03` 加 web_mail、`F3-04` 加 media_meta，
-    # 都插在这一行的同一个元组里、按上面写的顺序。
-    for module in (plaintext,):
+    # P3 逐块落地：`F3-03` 加 web_mail、`F3-04` 加 media_meta，都插在这一行的同一个
+    # 元组里、按上面写的顺序（`plaintext` → `office` → `web_mail` → `media_meta`）。
+    for module in (plaintext, office):
         extractor = module.build(config)
         if extractor is not None:
             registry.register(extractor.name, extractor)
