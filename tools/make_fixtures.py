@@ -20,7 +20,7 @@ uv run python tools/make_fixtures.py --list     # 列出清单（名字 / 路径
 
 1. PDF 必须 `no_new_id=True`——不加的话 MuPDF 每次保存写一个按时间算的 `/ID`；
 2. 三个 OOXML 里写"现在"的地方**必须被抹掉**，而**不是**指望库肯听你的。实测
-   （`tools/probe_ooxml_time.py`，读数见 `PROGRESS.md` §3 的 `E35`）：`.docx` /
+   （`tools/probe_ooxml_time.py`，读数见 `PROGRESS.md` §3 的 `E36`）：`.docx` /
    `.xlsx` / `.pptx` **三个都**把"现在"写进**每个 zip 条目**的时间戳；`.xlsx` 之外
    还多一处——`openpyxl` 在 `save()` 里**无条件**覆写 `docProps/core.xml` 的
    `created` 与 `modified`，先给 `wb.properties.modified` 赋固定值也拦不住；

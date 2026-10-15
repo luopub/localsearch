@@ -51,7 +51,7 @@ PYTHONIOENCODING=utf-8 uv run python tools/probe_ooxml_time.py
 
 ⚠ `.xlsx` 那一条还有一层：`openpyxl` 在 `save()` 里**无条件**覆写
 `dcterms:modified`，**先给 `wb.properties.modified` 赋一个固定值也拦不住它**
-（实测，见 `PROGRESS.md` §3 的 `E35`）——所以那一处只能在**打包之后**改，
+（实测，见 `PROGRESS.md` §3 的 `E36`）——所以那一处只能在**打包之后**改，
 没法在库这一层解决。
 
 ------------------------------------------------------------------------------
