@@ -50,6 +50,7 @@ import os
 import time
 from pathlib import Path
 
+from localsearch.core.paths import extended_path
 from localsearch.ingest.base import (
     Action,
     EntryCallback,
@@ -164,16 +165,21 @@ class ScandirScanner:
             stats.roots_unreachable.append((raw, "在 data_dir 里面，按硬性剔除跳过"))
             return
         path = Path(raw)
-        if not path.exists():
+        # 检查走扩展写法，交给 `_walk` 的 `path` 仍然是**原样**：`_walk` 递下去的
+        # 路径会变成 `ScanEntry.path`（`path_of`），带 `\\?\` 前缀的路径一旦进了
+        # 条目就会在下一次拼接、比较、去重里变成另一条路径。规则见 `core.paths`。
+        # 这一段与 `MftScanner._prepare_root` 逐条同义。
+        reachable = Path(extended_path(raw))
+        if not reachable.exists():
             stats.roots_unreachable.append((raw, "不存在或未挂载"))
             return
-        if not path.is_dir():
+        if not reachable.is_dir():
             stats.roots_unreachable.append((raw, "不是一个目录"))
             return
         # 根也要判标记：它是**最该判**的一个——用户把标记放进根，意思就是"这一整片
         # 先别索引"。根不产生 ScanEntry（见 ScanStats 的注释），所以这里只能记进
         # roots_unreachable，而不是走目录那条路。
-        if has_noindex_marker(path):
+        if has_noindex_marker(reachable):
             stats.roots_unreachable.append((raw, marker_reason()))
             return
         stats.roots_scanned += 1

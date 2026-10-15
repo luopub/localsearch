@@ -212,6 +212,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Iterable
 
+# 本模块平日只依赖标准库。`core` 是最内层（它不依赖 `ingest`），所以引它不算
+# 破坏这一层的性质——而路径的可达性是它必须知道的事，见下面 `content_hash`。
+from localsearch.core.paths import extended_path
+
 #: `quick_sig` 的配方号。配方一改就加一，好让落库的旧值**显式**退化成"重算"，
 #: 而不是被拿去与按新配方算的值逐字比较（见模块文档第 1 节的末尾）。
 QUICK_SIG_RECIPE = 1
@@ -261,8 +265,12 @@ def quick_sig_of(path: str | os.PathLike[str]) -> str:
 
     扫描那一层才需要"单条出错了继续"（`A1`），这一层是普通的库函数，吞掉异常只会
     让调用方分不清"没变"与"没读到"。
+
+    ⚠ `stat` 走 `extended_path(path)`：保留设备名的路径（`nul` 那一族）原样 `stat`
+    会**成功但报到设备上**（`st_ino=0`、大小 0），于是指纹算的是设备的签名。见
+    `core/paths` 的模块文档。
     """
-    return quick_sig(os.stat(path))
+    return quick_sig(os.stat(extended_path(path)))
 
 
 def sig_recipe(sig: str) -> int | None:
@@ -292,7 +300,7 @@ def sig_is_current(sig: str) -> bool:
 
 
 def content_hash(path: str | os.PathLike[str], *, chunk_size: int = CHUNK_SIZE) -> str:
-    """这条的**内容**哈希，形如 `sha256:9f86d081...`。读全文，分块流式。
+    r"""这条的**内容**哈希，形如 `sha256:9f86d081...`。读全文，分块流式。
 
     正确性不允许打折：`A9`（同一份内容只提取与嵌入一次）全押在它身上。所以它是
     `sha256` 而不是更快的什么——理由与实测见模块文档第 2 节。
@@ -309,9 +317,15 @@ def content_hash(path: str | os.PathLike[str], *, chunk_size: int = CHUNK_SIZE) 
     返回值的 `sha256:` 前缀有两个用处：让"拿错指纹"在日志里一眼可见（模块文档开头
     那张表），以及将来换算法时**旧值仍然认得出来**——不带前缀的一串十六进制，谁也
     说不清它是哪个算法产的。
+
+    ⚠ 打开的是 `extended_path(path)`，**这一步不能省**：路径最后一段若是保留设备名
+    （`nul` 那一族），原样 `open()` **不会报错**，它会在 `\\.\NUL` 上读到 EOF、返回
+    0 字节——于是这个文件**静默地索引成空**，哈希还是"正当的"空文件哈希。这正是
+    `F2-02` 真机核对那条差异牵出来的第二半（第一半在 `ntfs.attributes_of`），也是
+    项目明令禁止的"静默返回不完整结果"。见 `core/paths`。
     """
     h = hashlib.new(CONTENT_HASH_ALGO)
-    with open(path, "rb") as f:
+    with open(extended_path(path), "rb") as f:
         while True:
             block = f.read(chunk_size)
             if not block:

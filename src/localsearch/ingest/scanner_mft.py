@@ -13,10 +13,15 @@ r"""可选扫描后端：直接枚举 NTFS 的 MFT（P2 / `F2-02`）。测试落
 没有"按 FRN 认记录"的能力，增量就无从谈起。
 
 ⚠ **本模块不承诺 MFT 的冷扫比 scandir 快。** 原因是一个实测出来的硬账：USN 记录里
-**没有文件大小**，要补就得逐条再问一次文件系统；`os.stat` 是 36 µs/条（C: 上 273 万条
-= 97 s），足以把枚举省下的时间整条吃掉。改用 `GetFileAttributesExW`（14 µs/条，
-`ntfs.py` 的模块文档里有对拍数据）之后才勉强划算。**真正的读数由真机核对那一轮给出**
-（`tools/verify_mft_parity.py` + `docs/reports/F2-02-*.md`），本模块不预支结论。
+**没有文件大小**，要补就得逐条再问一次文件系统。这里原本引的 `F0-04` 对拍数
+（`os.stat` 36 µs/条、`GetFileAttributesExW` 14 µs/条）**在真机核对那一轮没有复现**：
+同一批路径上两者几乎相等（**5.3 µs 对 5.7 µs**，比值 0.93×，2026-10-15）。读数原样
+放在 `docs/reports/F2-02-MFT与scandir核对.md` 第四节，**这里不重抄**——两份必然漂移。
+
+补属性改用 `GetFileAttributesExW` 的决定**不变，理由换了**：不是因为它快（今天量不出
+差别），而是因为它**不开句柄**（不触发杀软的开句柄回调）。整轮读数同样在那份报告里：
+**205.89 s 对 65.52 s，慢 3.14×**——"全盘枚举更快、所以 MFT 当快路径"这个直觉
+在那份报告里被推翻了；MFT 的赢面要等 `F6-01` 的 USN 增量才谈得上，`F2-02` 只是地基。
 
 ------------------------------------------------------------------------------
 形态：先把整卷收进紧凑结构，再按深度序判
@@ -74,6 +79,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, ContextManager, Iterator
 
+from localsearch.core.paths import extended_path
 from localsearch.ingest import ntfs
 from localsearch.ingest.base import (
     FILE_ATTRIBUTE_REPARSE_POINT,
@@ -408,18 +414,23 @@ class MftScanner:
         if inside(norm, self._data_dir):
             stats.roots_unreachable.append((raw, "在 data_dir 里面，按硬性剔除跳过"))
             return None
-        path = Path(raw)
-        if not path.exists():
+        # 问真相的一律用扩展写法（`core.paths` 的规则）：名字是保留设备名的根
+        # ——`\\?\` 建得出来，比如 `D:/x/nul`——原样 `Path.is_dir()` 会返回 False
+        # （它走 `os.stat`，问到的是设备），于是这个根被一个**错误的理由**拒掉。
+        # 报出去的一律是 `raw`。这一段与 `ScandirScanner._scan_root` 逐条同义
+        # （那边多一条 `path`：`_walk` 要用它，而它必须是原样路径）。
+        reachable = Path(extended_path(raw))
+        if not reachable.exists():
             stats.roots_unreachable.append((raw, "不存在或未挂载"))
             return None
-        if not path.is_dir():
+        if not reachable.is_dir():
             stats.roots_unreachable.append((raw, "不是一个目录"))
             return None
-        if has_noindex_marker(path):
+        if has_noindex_marker(reachable):
             stats.roots_unreachable.append((raw, marker_reason()))
             return None
         try:
-            stat = os.stat(raw, follow_symlinks=False)
+            stat = os.stat(reachable, follow_symlinks=False)
         except OSError as exc:
             stats.roots_unreachable.append((raw, f"读不到属性：{exc}"))
             return None
@@ -629,16 +640,20 @@ class MftScanner:
         norm = normalize(path)
         is_dir = index.is_dir(slot)
         attrs = index.attrs[slot]
-        # 枚举白送的，`scandir` 那边要 36 µs 才拿得到（`base.ScanEntry.frn`）
+        # 枚举白送的，`scandir` 那边要**额外问一次**才拿得到（`base.ScanEntry.frn`；
+        # 那是它相对这里唯一的、真正多出来的开销。曾经引的 36 µs 对拍数在
+        # `F2-02` 真机核对里没复现，见模块文档）
         frn = index.frns[slot]
 
         # 属性：MFT 记录里只有属性位，**没有大小、没有时间**（见 `ntfs.py`）。
         # reparse 条目走 `os.stat`（要 tag，`GetFileAttributesExW` 不给），
-        # 其余走 `GetFileAttributesExW`（14 µs 对 36 µs）。
+        # 其余走 `GetFileAttributesExW`（理由见 `ntfs.py` 的模块文档：快慢已经
+        # 不是理由了，不开句柄才是）。
+        # 两支都把路径交给 `extended_path`：保留设备名的条目原样问会问到设备上。
         tag = 0
         try:
             if attrs & FILE_ATTRIBUTE_REPARSE_POINT:
-                stat = os.stat(path, follow_symlinks=False)
+                stat = os.stat(extended_path(path), follow_symlinks=False)
                 tag = reparse_tag_of(stat)
                 size, mtime_ns = stat.st_size, stat.st_mtime_ns
             else:

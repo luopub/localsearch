@@ -58,6 +58,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from localsearch.core.paths import extended_path
+
 # ==============================================================================
 # 常量
 # ==============================================================================
@@ -382,10 +384,15 @@ class FileAttrs(ctypes.Structure):
 
 
 def attributes_of(path: str) -> FileAttrs:
-    """问一条路径的属性。**不开句柄**，因而不触发杀软的开句柄回调，也不提权。
+    r"""问一条路径的属性。**不开句柄**，因而不触发杀软的开句柄回调，也不提权。
 
     路径不存在 / 权限不够时抛 `OSError`（带 `winerror`），由调用方计入错误账——
     扫描途中文件被删是常态，不是异常。
+
+    ⚠ 交给 Win32 的是 `extended_path(path)`：路径最后一段若是保留设备名
+    （`nul` 那一族），原样路径会被解析成 `\\.\NUL` 设备，这一条**报 `winerror=87`**，
+    于是那个文件在 MFT 后端里整条消失（`F2-02` 真机核对抓出来的 2 条差异就是它）。
+    抛异常时 `filename` 仍然填**原样路径**——报出去的必须是用户认得的那条路径。
 
     ⚠ **未实测**：对云占位文件（OneDrive「仅在线」，reparse point）这一条会不会
     触发下载。`GetFileAttributesExW` 按文档只读属性、不读数据，而 `scandir` 后端
@@ -393,7 +400,7 @@ def attributes_of(path: str) -> FileAttrs:
     行为差异。真机上遇到再记。
     """
     info = FileAttrs()
-    if not _k32.GetFileAttributesExW(path, 0, ctypes.byref(info)):
+    if not _k32.GetFileAttributesExW(extended_path(path), 0, ctypes.byref(info)):
         err = ctypes.get_last_error()
         # 抛出来的是**与 `os.stat` 同一种形状**的异常：`ctypes.WinError` 会把 Windows
         # 错误码映射成 `errno`、保留原始的 `winerror`、消息取自系统（本机是中文），

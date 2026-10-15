@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from localsearch.core.paths import extended_path
 from localsearch.ingest import ntfs, scanner_mft, scanner_scandir
 from localsearch.ingest.base import Action, ScanConfig, ScanEntry, ScanError
 from localsearch.ingest.filters import NOINDEX_MARKER, IgnoreRules
@@ -112,6 +113,12 @@ class FakeVolume:
         **`st_ino` 是 0**（`F0-04` 实测，`DirEntry` 的 stat 缓存里没有文件号），
         而 FRN 正是这份记录流的全部。用错的话每条记录的记录号都是 0，整棵树会
         塌成一个槽位——**第一次写这份替身就是这么错的**，表现是"扫描结果只剩目录"。
+
+        ⚠ 三处 `os.stat` 都走 `extended_path`：名字是保留设备名的条目（`nul` 那一族）
+        原样 `stat` 会**成功但报到设备上**（`st_ino=0`、属性 0），于是替身会给它造出
+        一条"记录号 0"的记录——那是 `$MFT` 的槽位，会被当成系统保留丢掉，**真机上
+        唯一看得见它的那个后端正是 MFT**。替身不这么打，它替的就不是真机。
+        普通名字上 `extended_path` 原样返回，所以这对既有测试是**无操作**。
         """
         todo = [root]
         while todo:
@@ -119,9 +126,9 @@ class FakeVolume:
             # 目录自己那条记录的父是它的**上一级**；而下面扫出来的每一条的父是
             # **这个目录自己**。两个 `stat` 写反过：表现是"所有子项都挂到了根上"，
             # 而它们在那条路径上并不存在，于是每一条都变成一个读属性的错误。
-            directory_stat = os.stat(directory, follow_symlinks=False)
+            directory_stat = os.stat(extended_path(directory), follow_symlinks=False)
             self._add(directory, directory_stat,
-                      os.stat(directory.parent, follow_symlinks=False))
+                      os.stat(extended_path(directory.parent), follow_symlinks=False))
             try:
                 with os.scandir(directory) as it:
                     entries = list(it)
@@ -129,7 +136,7 @@ class FakeVolume:
                 continue
             for entry in entries:
                 try:
-                    stat = os.stat(entry.path, follow_symlinks=False)
+                    stat = os.stat(extended_path(entry.path), follow_symlinks=False)
                 except OSError:
                     continue
                 self._add(Path(entry.path), stat, directory_stat)
@@ -470,6 +477,63 @@ def test_the_same_tree_gives_the_same_stream_from_both_backends(tmp_path: Path):
             ) == (dir_stats.files_seen, dir_stats.dirs_seen, dir_stats.files_index,
                   dir_stats.files_skipped, dir_stats.dirs_pruned, dir_stats.files_name_only)
     assert dir_stats.mft is None, "scandir 后端不该有 mft 那一块账"
+
+
+def test_a_device_named_file_gets_the_same_answer_from_both_backends(tmp_path: Path):
+    r"""保留设备名的文件（`nul` 那一族）在两个后端里必须是**同一个答案**。
+
+    真机上这一条就是 `F2-02` 第一次核对判「不通过」的地方：`scandir` 从目录枚举里
+    看得见 `…/nul`，而 MFT 后端要逐条问属性，原样路径被 Win32 解析成 `\\.\NUL`
+    设备 → `GetFileAttributesExW` 报 87 → 这条记录在 MFT 那边**根本不存在**。
+    绕行（`\\?\`）见 `core/paths.py`。
+
+    ⚠ 这里同时钉住了替身：它自己那三处 `os.stat` 也得走绕行，否则它造出来的是
+    "记录号 0"的记录（设备的 `st_ino`），会被当成系统保留丢掉——那样测试仍会"通过"，
+    但它测的已经不是真机上会发生的事了。
+    """
+    text = "nul is a real file"
+    nul = tmp_path / "nul"
+    with open(extended_path(nul), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    (tmp_path / "a.txt").write_text("A", encoding="utf-8")
+    try:
+        mft_kept, mft_skip, _ = scan_mft([tmp_path], FakeVolume([tmp_path]))
+        dir_kept, dir_skip, _ = scan_scandir([tmp_path])
+
+        assert stream(mft_kept) == stream(dir_kept)
+        assert stream(mft_skip) == stream(dir_skip)
+        # 不能只比"两边一致"：两边都看不见它也算一致。大小要真的是那 18 字节，
+        # 而不是设备的 0。
+        assert [e.size for e in mft_kept if e.name == "nul"] == [len(text.encode())]
+        assert [e.size for e in dir_kept if e.name == "nul"] == [len(text.encode())]
+    finally:
+        os.unlink(extended_path(nul))
+
+
+def test_a_device_named_root_is_scanned_by_both_backends(tmp_path: Path):
+    r"""名字是保留设备名的**根**：两个后端都必须扫，而不是拿一个错误的理由拒掉。
+
+    原样 `Path.is_dir()` 在 `…\\nul` 上返回 **False**（它走 `os.stat`，问到的是设备），
+    两个后端的根可达性检查都拿它当门槛——修之前这个根的理由是"不是一个目录"，
+    而它明明是个目录。对照：同一个目录，原样 `os.scandir` **列得出来**（实测），
+    所以下潜那一步不需要绕行，撒谎的只有 `is_dir()` 那一句。
+    """
+    root = tmp_path / "nul"
+    os.mkdir(extended_path(root))
+    inner = root / "inner.txt"
+    with open(inner, "w", encoding="utf-8") as fh:    # 中间一层是设备名，实测不影响
+        fh.write("in")
+    try:
+        mft_kept, _, mft_stats = scan_mft([root], FakeVolume([root]))
+        dir_kept, _, dir_stats = scan_scandir([root])
+
+        assert (mft_stats.roots_scanned, dir_stats.roots_scanned) == (1, 1)
+        assert not mft_stats.roots_unreachable and not dir_stats.roots_unreachable
+        assert stream(mft_kept) == stream(dir_kept)
+        assert names(mft_kept) == {"inner.txt"}
+    finally:
+        os.unlink(extended_path(inner))
+        os.rmdir(extended_path(root))
 
 
 def test_a_noindex_marker_prunes_the_whole_subtree(tmp_path: Path):
