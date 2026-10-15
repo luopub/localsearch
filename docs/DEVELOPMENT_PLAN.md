@@ -320,8 +320,8 @@ localsearch/
 │  │  ├─ base.py
 │  │  ├─ plaintext.py
 │  │  ├─ office.py             # pdf(PyMuPDF) / docx / xlsx / pptx
-│  │  ├─ web_mail.py           # html / htm / mht / eml / msg
-│  │  └─ media_meta.py         # 仅文件名 + EXIF/ID3
+│  │  ├─ web_mail.py           # html / htm / xhtml / mht / mhtml / eml / msg（原写 5 个）
+│  │  └─ media_meta.py         # 仅文件名 + EXIF（原写 EXIF/ID3）
 │  ├─ chunk/
 │  │  └─ sliding.py
 │  ├─ embed/
@@ -356,6 +356,11 @@ localsearch/
    ├─ fetch_model.py           # 一次性联网预下载权重到既有 HF_HOME（临时关闭 HF_HUB_OFFLINE）
    └─ bench_embed.py           # P0 吞吐实测
 ```
+
+> ⚠ **树里那两行注释各有一次落地时的改动**（都只改这句注释所指的范围，不改模块位置）：
+> - `web_mail.py` 认领的是 **7 个**扩展名：原写的 5 个之外加了 `.xhtml`（XHTML 是 HTML 的一种序列化，`bs4` 用的是同一个解析器，**没有理由把它推给别人**）与 `.mhtml`（`.mht` 的另一个常见写法，Windows 与部分浏览器就存这个后缀）。落地于 2026-10-16（`F3-03`），测试逐条钉着这 7 个，见 `PROGRESS.md` §4 P3「偏差」第 13 条。
+> - `media_meta.py` **只做图片 EXIF，不做 ID3**（用户 2026-10-15 决定：v1 不加依赖）。音频标签要么引依赖、要么自己写解析，都不值；`.mp3` 一类在 v1 只进**文件名层**。见 `PROGRESS.md` §4 P3「遗留」第 2 条。
+
 
 ### 4.4 数据库 schema
 
