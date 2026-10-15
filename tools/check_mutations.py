@@ -128,6 +128,74 @@ MUTATIONS: list[dict[str, object]] = [
         "why": "一张没有元数据的图与一张元数据没被我们的名单覆盖的图，在库里长得一样；"
                "不出声的话「搜不到」就没有线索",
     },
+    {
+        "id": "f3-05",
+        "label": "末尾不再收尾（切出一串互相包含的碎片）",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "        if end == limit:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_the_tail_is_not_sliced_into_nested_pieces",
+        "why": "规则 7。没有它时每篇正文的末尾都会多出几片**互相包含**的碎片"
+               "（512 -> 76 -> 11 -> 1），内容一个字不多、却各占一个向量与一行 FTS；"
+               "而它们看起来完全正常，只是多花几倍的钱",
+    },
+    {
+        "id": "f3-05",
+        "label": "相邻片不再重叠",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "        start = max(end - int(overlap_ratio * (end - start)), start + 1)",
+        "new": "        start = end",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_the_overlap_is_the_stated_fraction_of_the_char_span",
+        "why": "`overlap_ratio` 是配置里的一个数，切在被句子中间的那个词落在两片之间时，"
+               "没有重叠就意味着它两边都搜不回来——而片数、片长、一切报表都正常",
+    },
+    {
+        "id": "f3-05",
+        "label": "D8 的截断不再生效",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "    truncated = total > max_chunks_per_doc",
+        "new": "    truncated = False",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_one_over_the_limit_truncates_and_adds_the_summary",
+        "why": "`D8` 的 200 片上限挡的是 `R12`（一个 5 万行的表格造出上万片、吃掉"
+               "数小时索引时间）；判定一没，`R12` 就直接回来了",
+    },
+    {
+        "id": "f3-05",
+        "label": "让出的名额差一位（上限变成 +1 片）",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "        del windows[max_chunks_per_doc - 1 :]",
+        "new": "        del windows[max_chunks_per_doc - 2 :]",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_one_over_the_limit_truncates_and_adds_the_summary",
+        "why": "占位片**也占名额**：`D8` 说的是每文档 200 片，不是「200 片正文 + 1 片"
+               "说明」。差一位时总数还是 200 上下，报表看不出来",
+    },
+    {
+        "id": "f3-05",
+        "label": "窗口的边界从「装得下」变成「差一点装得下」",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "            if count_tokens(text[start:middle]) <= target_tokens:",
+        "new": "            if count_tokens(text[start:middle]) < target_tokens:",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_a_window_is_the_largest_one_that_fits",
+        "why": "规则 1 要的是**最大**的 `end`。差一个 token 看着无所谓，但它让"
+               "「边界是正文的函数」这条确定性变成了「搜索路径的函数」——同一个 blob"
+               "重跑时边界可能就变了，`embed_cache` 跟着全废（`A9`）",
+    },
+    {
+        "id": "f3-05",
+        "label": "整片空白的窗口不再跳过",
+        "file": "src/localsearch/chunk/sliding.py",
+        "old": "        if right > left:",
+        "new": "        if True:",
+        "tests": ["tests/unit/test_chunk_sliding.py"],
+        "expect": "test_no_chunk_is_empty_or_all_whitespace",
+        "why": "规则 4。空片会进 FTS、进向量：白占一行，还带回一个恒不命中的向量"
+               "（它连「最不像」都算不上，就是没有内容）",
+    },
 ]
 
 
