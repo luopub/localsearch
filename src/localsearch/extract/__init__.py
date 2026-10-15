@@ -75,12 +75,12 @@ def build_registry(config: ExtractConfig) -> Registry[Extractor]:
       写下来是为了**将来加 OCR / 多模态提取器时**有个明确的插入位置：新来的
       **必须**排在它想覆盖的那些后面，或者把名单改窄。
     """
-    from . import office, plaintext, web_mail
+    from . import media_meta, office, plaintext, web_mail
 
     registry: Registry[Extractor] = Registry("extractor")
-    # P3 逐块落地：`F3-04` 加 media_meta，插在这一行的同一个元组里、按上面写的顺序
-    # （`plaintext` → `office` → `web_mail` → `media_meta`）。
-    for module in (plaintext, office, web_mail):
+    # P3 的四个都在这里了（`F3-01` 到 `F3-04`）；`F3-05` 起是分块、失败隔离与
+    # fixtures，不再往这个元组里加东西。顺序就是上面文档里那条：格式的确定性从高到低。
+    for module in (plaintext, office, web_mail, media_meta):
         extractor = module.build(config)
         if extractor is not None:
             registry.register(extractor.name, extractor)

@@ -366,16 +366,24 @@ def test_the_registry_routes_html_to_web_mail(tmp_path):
 
 
 def test_the_registry_does_not_claim_what_nobody_owns_yet(tmp_path):
-    """`media_meta`（`F3-04`）还没上，老式 office 格式明确不做——这些一律"没人认领"。
+    """老式 office 格式与音频明确不做——这些一律"没人认领"。
 
     这不是本模块的职责，但它与上面的路由测试是一对：**认领地收窄**这件事得有反面
     样本，否则"`WEB_MAIL_EXTS` 写宽了"不会在那里红（写宽了会被这里的循环抓到，
     因为那时 `extract()` 会照实报 `UnsupportedFormat`——只是从 `first_match` 那层
     过不去，症状是 `find_extractor` 返回了 `web_mail`）。
+
+    ⚠ 这里原先还有 `a.jpg`，`F3-04` 落地时**必须**把它删掉——`media_meta` 认领了
+    它，同一个样本的结局从 `UnsupportedFormat` 变成了 `ParseFailed`（内容是
+    `b"nothing"`，认得出这是图片类的扩展名但认不出图片）。这条改动正是"绿灯不自动
+    续期"说的那种：老测试不是坏了，是**它盯的那个事实变了**。
+    图片那一侧的边界现在归 `test_extract_media_meta.py` 的
+    `test_nothing_outside_the_list_is_claimed` 与 `test_the_unclaimed_image_formats_fall_to_unsupported`
+    （`heic` / 相机 RAW / `gif` / `bmp` / `psd` 一族在那儿逐条钉着）。
     """
     registry = build_registry(ExtractConfig())
 
-    for name in ("a.jpg", "a.mp3", "a.doc", "a.xls"):
+    for name in ("a.mp3", "a.doc", "a.xls"):
         path = write(tmp_path, name, b"nothing")
         with pytest.raises(UnsupportedFormat):
             extract_file(path, registry=registry, config=ExtractConfig())
