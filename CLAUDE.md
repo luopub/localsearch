@@ -129,6 +129,11 @@
 - 模型只接受 **bf16/fp32**；fp16 产出 NaN（M2，二手）。
 - 任务前缀必须非对称且写对（查询 `task: search result | query: {q}`；文档 `title: {t} | text: {c}`，无标题用 `title: none`，M3，二手）。**写错不会报错，只会静默降低召回**，所以 P0 要把前缀的正确性测出来，不能靠推理。
 
+**Python 源码 / 文档串**（`F2-02` 那一轮实际踩过四次）
+
+- **凡是要在 `str` 文档串或字符串字面量里写 Windows 路径的，一律加 `r` 前缀。**（`F2-02` 那一轮在 `core/paths.py` 与四个调用点上各踩过一次。）不加的失败形态分两档：① **报错**——`\\?\U…` 里的 `\U`、`\New…` 里不成形的 `\N`，都是 **`SyntaxError`**，**整个模块不导入**；② **不报错**——`"C:\work\test"` 里的 `\w`、`\W` 只是 **`SyntaxWarning`**，代码照跑，字符串已经不是你写的那个。**第二档更坏：它看起来是绿的。**
+- **查这一档要指定命令，`compileall` 不管用**（2026-10-15 实测）：`python -W error::SyntaxWarning -m compileall -q <文件>` **什么都不印、退出码 0**，把警告吞掉了。能用的是这两条——单文件 `python -W error::SyntaxWarning <文件>`（那一条 `SyntaxWarning` 变成 `SyntaxError`、退出码 1）；包内模块 `python -W error::SyntaxWarning -c "import <包.模块>"`。改了路径密集的模块之后跑一次后者。
+
 **其他**
 
 - `.gitignore` 与 `.lsearchignore` 会给出相反答案（如 `*.log`：一个忽略、一个要索引）。这不是矛盾，两者目标不同，不要「顺手统一」。
