@@ -52,7 +52,10 @@ openpyxl，`.pptx` 走 python-pptx。共同点只有三条：**字节已经读�
 ------------------------------------------------------------------------------
 
 `_Text` 攒到 `MAX_CHARS` 就**整行地停**（不在行内切），此时 `ExtractedDoc.truncated`
-为真、并留一条警告。这么做的理由是**容器的解压放大**：`[scan] max_file_mb` 限的是
+为真、并留一条警告。这类在 `F3-03` 之后搬到了 `extract/_text.py`——`web_mail.py`
+要的是同一套截断语义，而"整行地停"与 `has_body` 的判定抄成两份迟早分岔。
+
+这么做的理由是**容器的解压放大**：`[scan] max_file_mb` 限的是
 **容器本身的字节数**，而一个 64 MB 的 xlsx 解开可以是几 GB 的 XML。上限取 1e6 字符的
 两个理由：
 
@@ -119,6 +122,7 @@ from typing import Any, Callable, Iterable
 
 from localsearch.core.models import ExtractedDoc
 
+from ._text import _Text
 from .base import (
     ExtractConfig,
     Extractor,
@@ -149,113 +153,6 @@ _W_T = f"{{{_W_NS}}}t"
 _W_TAB = f"{{{_W_NS}}}tab"
 _W_BR = f"{{{_W_NS}}}br"
 _W_CR = f"{{{_W_NS}}}cr"
-
-
-# ==============================================================================
-# 正文：逐行攒，到上限整行地停
-# ==============================================================================
-
-
-class _Text:
-    """逐行攒正文，`max_chars` 到顶就停，并把"停过"记下来。
-
-    判定用的是 `len("\\n".join(lines))` 这个口径（每行之间一个换行），所以
-    **整行收或整行不收**：不切一半的行，因为"正文到哪里为止"这件事要一句话说得清，
-    而那条截断警告说的就是它。
-
-    行分两种：**正文行**（`line()` / `block()`）与**标记行**（`marker()`）。两者在
-    正文里的地位一样（都进 `text`、都算偏移），分开只是为了回答 `has_body` 那一个
-    问题——见它的文档。
-    """
-
-    __slots__ = ("_lines", "_size", "_max", "_body", "truncated")
-
-    def __init__(self, max_chars: int) -> None:
-        self._max = max_chars
-        self._lines: list[str] = []
-        self._size = 0
-        self._body = False
-        self.truncated = False
-
-    @property
-    def max_chars(self) -> int:
-        return self._max
-
-    @property
-    def full(self) -> bool:
-        """已经到顶（到顶之后 `line()` / `marker()` 什么都不做）。"""
-        return self.truncated
-
-    @property
-    def has_body(self) -> bool:
-        """收进来过**非空白的正文行**（标记行不算）。
-
-        ⚠ 不加这个区分的话，`extract()` 里那句"正文是不是空的"会被**自己的标记**骗过去：
-        pptx 每张幻灯片都先加一个 `【第 N 张幻灯片】`，于是一份只有图片的 pptx 看起来
-        "有正文"，那条"没有提取到任何文本"的警告就永远不出现。`2026-10-15` 的第一版
-        就是这样，写测试时当场抓到（`test_an_image_only_pptx_is_an_empty_doc_with_a_warning`）。
-        """
-        return self._body
-
-    @property
-    def text(self) -> str:
-        return "\n".join(self._lines)
-
-    def line(self, text: str) -> None:
-        """收一行正文。**空串也是一行**——段落之间的空行是结构，与 `plaintext.py`
-        不清理空行的口径一致。"""
-        self._add(text, body=True)
-
-    def marker(self, text: str) -> None:
-        """收一行**标记**（`【第 N 页】` 这类，见模块文档那张表）。"""
-        self._add(text, body=False)
-
-    def block(self, text: str) -> None:
-        """把一段**多行**文本按行收进来（库自己给的换行在这种场合就是段落边界）。
-
-        这里统一用 `\\n` 重接：PDF / xlsx / pptx 的正文本来就是库**合成**出来的，
-        不存在"原样字节"可比——`plaintext.py` 那条"不归一化换行"的规矩是针对**原始
-        解码文本**的，这里没有同一件事要保护。
-        """
-        for one in text.splitlines():
-            self.line(one)
-            if self.truncated:
-                return
-
-    def reset(self) -> None:
-        """倒空重攒（xlsx 的第二遍用），**对象不换**。
-
-        ⚠ 必须是"重置"而不是"再造一个 `_Text`"：`extract()` 拿着的是**创建时那个
-        对象**，`truncated` / `has_body` 都从它身上读。换对象的话，那两个结论会留在
-        第一遍上，而**两遍的长度可以反过来**——缓存值可能比公式原文长得多（`=A1`
-        算出 16 个汉字），那时第一遍装得下、第二遍装不下，换对象给出的账是"正文只到
-        第 2 行、`truncated` 却是假、截断警告也没有"。
-
-        （`2026-10-15` 实测：上限 30、缓存值 16 字时，旧写法给 `truncated=False` 且
-        `warnings=()`。**注意拦得住这一支的只有"缓存值更长"**——第一版这条测试用的是
-        "缓存值更短"的工作簿，两遍都装得下，换不换对象都绿。回归线是
-        `test_the_truncation_flag_describes_the_second_pass`。）
-
-        另一头见 `_parse_xlsx`：第一遍就满了的时候第二遍**根本不跑**。那条闸门与这里
-        配套——`reset()` 会把 `truncated` 清掉，闸门一撤，满了的正文就会被重置成
-        "没满"，标志与警告一起消失。
-        """
-        self._lines.clear()
-        self._size = 0
-        self._body = False
-        self.truncated = False
-
-    def _add(self, text: str, *, body: bool) -> None:
-        if self.truncated:
-            return
-        extra = len(text) + (1 if self._lines else 0)
-        if self._size + extra > self._max:
-            self.truncated = True
-            return
-        self._lines.append(text)
-        self._size += extra
-        if body and text.strip():
-            self._body = True
 
 
 # ==============================================================================

@@ -1,12 +1,15 @@
-r"""F3-02 微基准：office 那四个库的**冷导入**要花多少。
+r"""微基准：按需导入的那几个库，**冷导入**各要花多少。
 
-对应功能点：**F3-02**（office 提取器）。产出指标 **E32**（`docs/PROGRESS.md` §3）。
+对应功能点：**F3-02**（office 提取器，产出 **E32**）与 **F3-03**（web_mail 提取器，
+产出 **E33**）。两者同一张表，理由也一样：两个模块都把第三方库写在各自的
+`_parse_*` **函数里**导入，不是模块顶层，而"省下了多少"必须有读数才算数。
 
 ---- 为什么需要它 --------------------------------------------------------------
 
 `extract/office.py` 把四个库都写在各自的 `_parse_*` **函数里**导入，不是模块顶层，
 理由是"别让每一次 `lsearch` 启动都付这笔钱"。**那笔钱原来只有一次性内联命令量过、
 没入库**——按 `E12` 立下的规矩（缺命令与计数的读数无法复跑），这里把它补上。
+`F3-03` 的 `web_mail.py` 照搬了同一条做法（`E33`），于是候选里多一组。
 
 ⚠ 这个脚本**不验语义**，只量时间；它没有 `bench_paths.py` 那样的"两份实现逐条比对"
 护栏，因为没有第二份实现可比。**读它的时候只信"数量级与相对大小"**，别把某一轮的
@@ -21,9 +24,11 @@ r"""F3-02 微基准：office 那四个库的**冷导入**要花多少。
 候选：
 - `import localsearch.extract.plaintext`——**基线**。`build_registry()` 会 import
   `plaintext`，它是"今天每一次启动都在付的那一笔"。
-- 四个库各一条、`lxml.etree` 一条（`_ooxml_errors()` 在函数里 import 它）。
-- **四个一起**——顶层 import 的代价就是这一条：写了顶层 import，四个库会**全部**
-  被拉起来，而不是"用到哪个拉哪个"。
+- office 侧：四个库各一条、`lxml.etree` 一条（`_ooxml_errors()` 在函数里 import 它）。
+- web_mail 侧：`bs4` / `extract_msg` 各一条，`email.policy` 一条（标准库那一个，
+  量它是为了说明**它不用省**——省标准库只是把复杂度换回来）。
+- **两组各一条"一起"**——顶层 import 的代价就是这两条：写了顶层 import，那一组
+  几个库会**全部**被拉起来，而不是"用到哪个拉哪个"。
 
 ---- 为什么是"三轮取最小"而不是中位数 ------------------------------------------
 
@@ -60,7 +65,17 @@ CANDIDATES: list[tuple[str, str]] = [
     ("openpyxl", "openpyxl"),
     ("pptx", "pptx"),
     ("lxml.etree", "lxml.etree"),
-    ("四个库一起", "pymupdf, docx, openpyxl, pptx"),
+    ("office 四个一起", "pymupdf, docx, openpyxl, pptx"),
+    ("bs4", "bs4"),
+    ("extract_msg", "extract_msg"),
+    ("email.policy", "email.message, email.policy"),
+    ("web_mail 三个一起", "bs4, extract_msg, email.message, email.policy"),
+]
+
+#: 汇总比值时用的两组：标签 → 分母（基线）与分子（顶层 import 的代价）。
+COMBOS: list[tuple[str, str]] = [
+    ("office 四个一起", "localsearch.extract.plaintext"),
+    ("web_mail 三个一起", "localsearch.extract.plaintext"),
 ]
 
 #: 子进程里跑的那段：**先起表、再 import**，最后只 echo 一个毫秒数。
@@ -101,7 +116,7 @@ def one_shot(mods: str) -> float:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="office 四库冷导入微基准（E32）")
+    ap = argparse.ArgumentParser(description="按需导入的库的冷导入微基准（E32 / E33）")
     ap.add_argument("--rounds", type=int, default=3, help="每个候选项跑几轮，取最小值（默认 3）")
     args = ap.parse_args()
 
@@ -124,9 +139,10 @@ def main() -> int:
               + " ".join(f"{v:.1f}" for v in readings))
 
     print()
-    all_four = min(measured["四个库一起"])
-    base = min(measured["localsearch.extract.plaintext"])
-    print(f"四个一起 / 基线     {all_four / base:.1f}x（{all_four:.1f} ms 对 {base:.1f} ms）")
+    for combo, denominator in COMBOS:
+        top = min(measured[combo])
+        base = min(measured[denominator])
+        print(f"{combo} / 基线".ljust(20) + f"{top / base:.1f}x（{top:.1f} ms 对 {base:.1f} ms）")
     print(f"机器时间            {datetime.now():%Y-%m-%d %H:%M:%S}")
     return 0
 
