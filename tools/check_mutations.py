@@ -23,8 +23,10 @@ r"""把"这条测试真的盯着那处代码"从一句话变成一条可复跑�
 1. **要求那处改动在源码里出现且只出现一次**（`old` 在文件里的匹配数必须是 1）。
    匹配 0 次说明这句代码已经被改过形（这条变体**过期了**），匹配多次说明它
    改不准——两种都必须报错退出，不许"尽力而为"。
-2. **要求目标文件在 git 上是干净的**。这个工具会把工作区的源码改坏几秒钟，
-   要是文件本来就有未提交的改动，恢复之后分不清哪些是我的——**宁可拒绝跑**。
+2. **要求目标文件在 git 上是干净的**——判**两次**：一次 `git status`，一次拿
+   工作区的字节跟索引里那份比。这个工具会把工作区的源码改坏几秒钟，要是文件
+   本来就有未提交的改动，恢复之后分不清哪些是我的，所以**宁可拒绝跑**；而
+   `git status` 单独用会漏（理由见 `_check_preconditions`）。
 3. 改坏 → 跑 `pytest`（只跑这一组点名的测试）→ **还原**。
 4. 判定：**必须红**，而且**红的必须包括点名的那条测试**、pytest 的退出码必须是
    `1`（测试失败）。退出码 `2` 是收集期出错——那种情况下"红了"是假的：
@@ -34,6 +36,13 @@ r"""把"这条测试真的盯着那处代码"从一句话变成一条可复跑�
 
 退出时**逐字节比对**还原结果与原文，不一致就报错（那种情况下工作区已经被弄脏，
 得 `git checkout` 回来）。
+
+⚠ **行尾是这一层的雷**（2026-10-16 踩到，工具自己的 bug）：改写源码用的是
+`pathlib.write_text`，它的 `newline=None` 会把 `\n` 按**平台**落成换行——在
+Windows 上就是把目标文件整篇换成 CRLF。于是"改坏→还原"这一趟下来内容一个字
+没变、**行尾变了**，工作区平白变脏，下一次调用被自己的前置检查拦在门外。
+现在写的是**字节**：改的时候用文件自己的行尾，还原的时候把它原来的字节原样
+写回。
 
 ------------------------------------------------------------------------------
 一句话的诚实交代
@@ -205,17 +214,58 @@ def _git(args: list[str]) -> str:
     return result.stdout.strip()
 
 
-def _check_preconditions(mutation: dict) -> pathlib.Path:
-    """拒绝在脏文件上动手，并确认那处改动匹配得上、且只匹配一处。"""
-    path = ROOT / str(mutation["file"])
-    dirty = _git(["status", "--porcelain", "--", str(mutation["file"])])
+def _index_blob(relative: str) -> bytes:
+    """索引里那份内容（`git cat-file blob :<路径>`）。
+
+    按**内容**判干净要用它——`git status` 会漏，理由见 `_check_preconditions`。
+    """
+    result = subprocess.run(["git", "cat-file", "blob", f":{relative}"], cwd=ROOT,
+                            capture_output=True)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise SystemExit(f"读不到索引里的 {relative}（{detail}）——它还没被 git 跟踪？")
+    return result.stdout
+
+
+def _decode(raw: bytes) -> str:
+    """字节 → 文本，行尾统一成 `\\n`。
+
+    统一在**入口**做一次，后面 `old` / `new` 那些字面量就只用管 `\\n`；还原那
+    一步不走这条路（直接写回字节），所以行尾不会被这一步改掉。
+    """
+    return raw.decode("utf-8").replace("\r\n", "\n")
+
+
+def _check_preconditions(mutation: dict) -> tuple[pathlib.Path, bytes]:
+    """拒绝在脏文件上动手，并确认那处改动匹配得上、且只匹配一处。
+
+    ⚠ **干净要判两次**：`git status` 先比索引里记下的 stat（大小 / 修改时间），
+    对得上就不再读内容，所以它**有看不见的脏**。2026-10-16 实测到一条能踩进去
+    的路径：`media_meta.py` 工作区是 CRLF、索引里是 LF，差 617 字节，而
+    `git status --porcelain` 报的是**空**（同一个仓库里 `sliding.py` 同样是
+    CRLF 却报 `M`）。成因是"索引里记的 stat 恰好等于工作区现在的 stat"——它是
+    状态依赖的，不是这个文件的固有属性，所以靠它做的检查今天拦得住、明天拦不住。
+    再加的这一道按**内容**比（行尾归一化之后），就跟 stat 无关了。
+    """
+    relative = str(mutation["file"])
+    path = ROOT / relative
+    raw = path.read_bytes()
+
+    dirty = _git(["status", "--porcelain", "--", relative])
     if dirty:
         raise SystemExit(
-            f"拒绝跑：{mutation['file']} 有未提交的改动（{dirty!r}）。\n"
+            f"拒绝跑：{relative} 有未提交的改动（{dirty!r}）。\n"
             "这个工具会把源码改坏几秒钟再还原，文件本来就不干净的话分不清哪些是我的。\n"
             "先提交或 stash 再跑。"
         )
-    source = path.read_text(encoding="utf-8")
+    if raw.replace(b"\r\n", b"\n") != _index_blob(relative).replace(b"\r\n", b"\n"):
+        raise SystemExit(
+            f"拒绝跑：{relative} 的内容和索引里的那份不一样，但 `git status` 说它干净。\n"
+            "这正是这道检查存在的理由（stat 缓存会让 status 漏掉内容差异）。\n"
+            f"先看一眼 `git diff -- {relative}`，确认那些改动是你要的再提交。"
+        )
+
+    source = _decode(raw)
     hits = source.count(str(mutation["old"]))
     if hits != 1:
         raise SystemExit(
@@ -224,24 +274,30 @@ def _check_preconditions(mutation: dict) -> pathlib.Path:
             "匹配 0 处说明那句代码已经被改过形——**这条变体验的东西可能已经不在了**，"
             "要重新想一条；匹配多处说明它改不准。两种都不许「尽力而为」。"
         )
-    return path
+    return path, raw
 
 
 def _run(mutation: dict) -> dict:
-    path = _check_preconditions(mutation)
-    source = path.read_text(encoding="utf-8")
+    path, raw = _check_preconditions(mutation)
+    source = _decode(raw)
     mutated = source.replace(str(mutation["old"]), str(mutation["new"]), 1)
+
+    #: 写回去用**文件自己的**行尾，不按平台（`Path.write_text` 的 `newline=None`
+    #: 会在 Windows 上把整篇换成 CRLF，见文件头那段 ⚠）。
+    newline = "\r\n" if b"\r\n" in raw else "\n"
 
     command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                "--no-header", *[str(one) for one in mutation["tests"]]]
     try:
-        path.write_text(mutated, encoding="utf-8")
+        path.write_bytes(mutated.replace("\n", newline).encode("utf-8"))
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace")
     finally:
-        path.write_text(source, encoding="utf-8")
+        # 还原写的是**原来的字节**，不是"把读出来的文本再编一遍"——那样每跑一趟
+        # 都要经过一次编解码，行尾就是在这条路上被改掉的。
+        path.write_bytes(raw)
 
-    if path.read_text(encoding="utf-8") != source:
+    if path.read_bytes() != raw:
         raise SystemExit(f"还原失败：{mutation['file']} 与原文不一致，请 git checkout 回来")
 
     failed = sorted(
