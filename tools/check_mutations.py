@@ -23,12 +23,16 @@ r"""把"这条测试真的盯着那处代码"从一句话变成一条可复跑�
 1. **要求那处改动在源码里出现且只出现一次**（`old` 在文件里的匹配数必须是 1）。
    匹配 0 次说明这句代码已经被改过形（这条变体**过期了**），匹配多次说明它
    改不准——两种都必须报错退出，不许"尽力而为"。
-2. **要求目标文件在 git 上是干净的**——判**两次**：一次 `git status`，一次拿
+2. **点名的测试必须真的叫这个名字**（扫一遍 `def`）。2026-10-16 实测：新写的
+   `console` 变体把 `expect` 写成 `test_cli_entry_calls_the_hatch`（真名多一个
+   `the_`），报告说的是**「这里没有护栏」**，而真相是名字写错了。这两种情形在
+   红名单上看不出区别——红名单里躺着的正是那条测试，只有判定匹配不上。
+3. **要求目标文件在 git 上是干净的**——判**两次**：一次 `git status`，一次拿
    工作区的字节跟索引里那份比。这个工具会把工作区的源码改坏几秒钟，要是文件
    本来就有未提交的改动，恢复之后分不清哪些是我的，所以**宁可拒绝跑**；而
    `git status` 单独用会漏（理由见 `_check_preconditions`）。
-3. 改坏 → 跑 `pytest`（只跑这一组点名的测试）→ **还原**。
-4. 判定：**必须红**，而且**红的必须包括点名的那条测试**、pytest 的退出码必须是
+4. 改坏 → 跑 `pytest`（只跑这一组点名的测试）→ **还原**。
+5. 判定：**必须红**，而且**红的必须包括点名的那条测试**、pytest 的退出码必须是
    `1`（测试失败）。退出码 `2` 是收集期出错——那种情况下"红了"是假的：
    整个文件没导进来，所有测试一起红，看着像护栏其实什么都没验。
 
@@ -57,9 +61,13 @@ Windows 上就是把目标文件整篇换成 CRLF。于是"改坏→还原"这�
 用法
 ------------------------------------------------------------------------------
 
-    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py
-    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py --only f3-04
-    PYTHONIOENCODING=utf-8 uv run python tools/check_mutations.py --list
+    uv run python tools/check_mutations.py
+    uv run python tools/check_mutations.py --only f3-04
+    uv run python tools/check_mutations.py --list
+
+**不需要设 `PYTHONIOENCODING`**：输出面上的多字节兜底在 `core/console.py`
+（`use_safe_output()`，本文件的 `main()` 第一行调用）——编不出的字符降级成 `?`，
+不再让退出码无端变 1（`E16` / `E37`）。
 
 ⚠ **跑的时候本机在跑 pytest，占用率会上去**。它量的是"红不红"、不是耗时，
 所以不怕噪声——但也别拿它的运行时间当什么基准。
@@ -69,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -367,7 +376,7 @@ MUTATIONS: list[dict[str, object]] = [
         "old": "    use_safe_output()\n    args = list(",
         "new": "    args = list(",
         "tests": ["tests/unit/test_console_output.py"],
-        "expect": "test_cli_entry_calls_the_hatch",
+        "expect": "test_the_cli_entry_calls_the_hatch",
         "why": "这一条盯的是**静态**那一半（入口里有没有那句调用）。兜底一旦从入口"
                "消失，`lsearch index --help > x.txt` 就会重新崩在重定向上——但静态"
                "检查先红，因为它跑的是一条 AST，比真跑一个进程便宜得多",
@@ -490,6 +499,27 @@ def _check_preconditions(mutation: dict) -> tuple[pathlib.Path, bytes]:
             "（必须是 1）。\n"
             "匹配 0 处说明那句代码已经被改过形——**这条变体验的东西可能已经不在了**，"
             "要重新想一条；匹配多处说明它改不准。两种都不许「尽力而为」。"
+        )
+
+    # ⚠ **点名的测试必须真的叫这个名字**。2026-10-16 实测到这条：新写的 `console`
+    # 变体把 `expect` 写成 `test_cli_entry_calls_the_hatch`（真名多一个 `the_`），
+    # 于是"改坏之后那条测试没红"——**报告说的是"这里没有护栏"，而真相是我把名字写
+    # 错了**。这两种情形在红名单上看不出区别（红名单里躺着的正是那条测试），只有
+    # 判定的 `matched` 是空的。它比"没红"更隐蔽：真没护栏会让人去补测试，写错名字
+    # 会让人以为那条测试是假的。所以按 `def` 扫一遍，名字对不上就当场拒绝。
+    defined: set[str] = set()
+    for one in mutation["tests"]:
+        defined |= set(re.findall(r"^\s*def\s+(\w+)",
+                                  (ROOT / one).read_text(encoding="utf-8"), re.M))
+    expect = str(mutation["expect"])
+    if expect not in defined:
+        near = sorted(name for name in defined if expect.split("_")[-1] in name)
+        raise SystemExit(
+            f"变体点名错了：`{expect}` 在 {'、'.join(str(o) for o in mutation['tests'])} "
+            f"里没有这个 `def`（{len(defined)} 个测试函数里找不着）。\n"
+            + (f"是不是想写：{'、'.join(near)}？\n" if near else "")
+            + "⚠ 这一条**不是**「没护栏」：名字写错时那条测试照样会红，红名单里也看得见"
+              "它，只有判定匹配不上。先改名字，别去补测试。"
         )
     return path, raw
 
