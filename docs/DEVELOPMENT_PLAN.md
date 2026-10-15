@@ -276,7 +276,7 @@ uv run lsearch doctor        # 自检：依赖版本、模型、FTS5、磁盘、
 配套约定：
 
 - `SearchHit` 数据类**预留字段**：`modality`、`score_breakdown`（各路得分）、`thumbnail_ref`（未来缩略图/波形）、`locator`（字符偏移，便于编辑器跳转）
-- 注册表模式（`plugins.py`）：新提取器/嵌入器通过装饰器注册，不改核心分发逻辑
+- 注册表模式：新提取器/嵌入器通过**显式 `register()`** 加进表里，不改核心分发逻辑。**落地时改掉了原写的"通过装饰器注册"**（2026-10-15，`F3-01`）：装饰器注册的匹配顺序会变成"谁先被 import"的函数，而出错是静默的；显式注册让顺序只有一处说了算（`extract.build_registry()` 里那个元组）。实现落在 `core/registry.py`（通用表）而**不是原写的 `plugins.py`**——它不止给插件用，`P4`/`P5` 的存储与融合策略要共用它。详见 `PROGRESS.md` §4 P3「偏差」第 5 条。
 - CLI 与未来 GUI 是 `SearchService` 的**对等消费者**，不出现"CLI 里写业务逻辑，GUI 时再抽出来"的技术债
 - `embed_ver` 指纹入库：模型/维度/量化任一变更即标记为 stale，触发定向重嵌入，而不是全量重建
 
