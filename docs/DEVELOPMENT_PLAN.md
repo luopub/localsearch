@@ -817,7 +817,7 @@ lsearch                             # 无参数 = 进入交互模式（D7）
 | c | CLI 输出语言 | 中文 | 纯观感 |
 | d | ~~夜间自动增量~~ | **配置已落盘，注册与验证推迟到开发完成后**（见 §4.8）；权限档默认 `LeastPrivilege` + `scandir`，要更快可改 XML 一行换 `HighestAvailable` + MFT/USN | 从"要不要做"变成"用哪种权限档" |
 | e | 单文件大小上限 | `max_file_mb = 64`，超过只索引文件名 | 影响大 PDF / 大日志的正文覆盖度 |
-| f | 分块参数 | 512 tokens / 15% 重叠 | 切片粒度与索引体积 |
+| f | 分块参数 | 512 tokens / 15% 重叠。**2026-10-16 补注（`F3-05`）**：三个数都按原值落进了 `src/localsearch/chunk/sliding.py`（默认值只在 `core/config.py` 的 `ChunkCfg` 与 `config/default.toml` 两处），其中 `max_chunks_per_doc = 200` 是 `D8` 定过的，**而 512 与 0.15 至今未获确认**。⚠ 改这两个数不是参数微调：边界一变，`(blob_id, ord)`、每个 `n_tokens`、每个待嵌字符串全变，`embed_cache` 一条都复用不上（§4.4 的 `parser_ver` 变更）——**要改趁 P4 全盘索引跑起来之前改** | 切片粒度与索引体积 |
 
 > d 项的默认是 **`LeastPrivilege`**。要换档改 XML 里一行（`<RunLevel>`），理由与代价见 §4.8。
 
