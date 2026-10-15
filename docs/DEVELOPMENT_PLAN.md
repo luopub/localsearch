@@ -317,7 +317,8 @@ localsearch/
 │  │  ├─ fingerprint.py        # quick_sig / content_hash（含 size 预筛）
 │  │  └─ dedup.py              # 内容去重与引用计数（D12）
 │  ├─ extract/                 # 提取器（modality 概念在此落地）
-│  │  ├─ base.py
+│  │  ├─ base.py               # 派发 / 读盘 / 编码：单个文件那一档的入口
+│  │  ├─ batch.py              # 按批提取：一个文件出事不停下整轮（A6，F3-07 加的，见下方注）
 │  │  ├─ plaintext.py
 │  │  ├─ office.py             # pdf(PyMuPDF) / docx / xlsx / pptx
 │  │  ├─ web_mail.py           # html / htm / xhtml / mht / mhtml / eml / msg（原写 5 个）
@@ -357,9 +358,10 @@ localsearch/
    └─ bench_embed.py           # P0 吞吐实测
 ```
 
-> ⚠ **树里那两行注释各有一次落地时的改动**（都只改这句注释所指的范围，不改模块位置）：
+> ⚠ **树里那几行注释各有一次落地时的改动**（前两条只改注释所指的范围、不动模块位置；第三条是树里**多了一个文件**）：
 > - `web_mail.py` 认领的是 **7 个**扩展名：原写的 5 个之外加了 `.xhtml`（XHTML 是 HTML 的一种序列化，`bs4` 用的是同一个解析器，**没有理由把它推给别人**）与 `.mhtml`（`.mht` 的另一个常见写法，Windows 与部分浏览器就存这个后缀）。落地于 2026-10-16（`F3-03`），测试逐条钉着这 7 个，见 `PROGRESS.md` §4 P3「偏差」第 13 条。
 > - `media_meta.py` **只做图片 EXIF，不做 ID3**（用户 2026-10-15 决定：v1 不加依赖）。音频标签要么引依赖、要么自己写解析，都不值；`.mp3` 一类在 v1 只进**文件名层**。见 `PROGRESS.md` §4 P3「遗留」第 2 条。
+> - **`extract/batch.py` 是 `F3-07` 时加进树里的**（2026-10-16）：原树里**没有**"按批提取"这一档，而 `A6`（单文件解析失败不中断整轮）**必须**有一处落点，`base.py` 那份文档串当时就把位置留给了 `F3-07`。它是提取层的**批处理形态**、不是更高一层：除了接住异常与计数什么都不做（不写库、不切片、不判 tier、不重试），`P4` 的索引循环直接用它。同一条还顺带定死了"结局 → `files.status`"的映射（`fulltext` / `skipped` / `error`）与 `files.error_msg` 的形态（一行、带异常类名、上限 200 字符）。见 `PROGRESS.md` §4 P3「偏差」第 22 条。
 
 
 ### 4.4 数据库 schema
