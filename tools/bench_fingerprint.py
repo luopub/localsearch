@@ -60,6 +60,7 @@ import tempfile
 import time
 
 from localsearch.core.config import load_config
+from localsearch.core.console import use_safe_output
 from localsearch.ingest.filters import PROJECT_ROOT, IgnoreRules
 from localsearch.ingest.fingerprint import SizeIndex, content_hash
 from localsearch.ingest.scanner_scandir import ScandirScanner
@@ -621,6 +622,8 @@ def bench_opens(roots: tuple[str, ...], limit: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stat", action="store_true", help="第 1 组：quick_sig 的失效格子")
     ap.add_argument("--hash", action="store_true", help="第 2 组：哈希吞吐")

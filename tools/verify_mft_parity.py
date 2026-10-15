@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from localsearch.core.config import ConfigError, load_config
+from localsearch.core.console import use_safe_output
 from localsearch.ingest import ntfs
 from localsearch.ingest.base import (
     MftStats,
@@ -503,6 +504,8 @@ def main(argv: list[str] | None = None, *,
 
     命令行上的 `--mft-from-tree` 会自动填它；真正的提权验收两个都不给。
     """
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     args = build_parser().parse_args(argv)
 
     try:

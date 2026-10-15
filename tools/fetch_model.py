@@ -47,6 +47,8 @@ import shutil
 import time
 from pathlib import Path
 
+from localsearch.core.console import use_safe_output
+
 REPO_ID = "google/embeddinggemma-2"
 MAIN_WEIGHT = "model.safetensors"
 
@@ -206,6 +208,8 @@ def inspect_shapes(local_dir: str) -> None:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     section("P0  预下载 google/embeddinggemma-2")
     print(f"  开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 

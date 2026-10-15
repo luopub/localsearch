@@ -61,6 +61,7 @@ import warnings
 
 from PIL import ExifTags, Image, ImageFile, TiffImagePlugin
 
+from localsearch.core.console import use_safe_output
 from localsearch.extract.media_meta import IMAGE_EXTS
 
 BY_NAME = {name: tag for tag, name in ExifTags.TAGS.items()}
@@ -160,6 +161,8 @@ def probe_load(data: bytes, target: str, kind: str) -> str:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     print(f"Pillow {Image.__version__}；本机 Python {os.sys.version.split()[0]}")
     workdir = tempfile.mkdtemp(prefix="probe-pillow-")
 

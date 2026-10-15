@@ -57,6 +57,8 @@ import sys
 import time
 from datetime import datetime
 
+from localsearch.core.console import use_safe_output
+
 #: 候选项：(标签, 在子进程里 import 的东西)。顺序无关紧要——每一项都换新进程。
 CANDIDATES: list[tuple[str, str]] = [
     ("localsearch.extract.plaintext", "localsearch.extract.plaintext"),
@@ -116,6 +118,8 @@ def one_shot(mods: str) -> float:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description="按需导入的库的冷导入微基准（E32 / E33）")
     ap.add_argument("--rounds", type=int, default=3, help="每个候选项跑几轮，取最小值（默认 3）")
     args = ap.parse_args()

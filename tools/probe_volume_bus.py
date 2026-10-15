@@ -43,6 +43,8 @@ import sys
 from ctypes import wintypes
 from datetime import datetime
 
+from localsearch.core.console import use_safe_output
+
 # ---- 常量 -------------------------------------------------------------------
 
 #: `IOCTL_STORAGE_QUERY_PROPERTY` = CTL_CODE(IOCTL_STORAGE_BASE, 0x500, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -161,6 +163,8 @@ def volume(drive: str) -> dict:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--drives", default="CD",
                     help="要探测的盘符（默认 CD）。⚠ 项目规定只碰 C: 与 D:，"

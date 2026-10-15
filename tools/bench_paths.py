@@ -54,6 +54,7 @@ import statistics
 import time
 from datetime import datetime
 
+from localsearch.core.console import use_safe_output
 from localsearch.core.paths import DEVICE_NAMES, _ALREADY, extended_path
 
 #: 语料里各形态的占比。普通名字必须占绝大多数——真实盘上就是这样，
@@ -141,6 +142,8 @@ def naive_extended_path(path: str) -> str:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description="F2-02 路径可达性判定微基准（纯内存，不碰盘）")
     ap.add_argument("--paths", type=int, default=2000, help="合成语料的路径条数")
     ap.add_argument("--rounds", type=int, default=7, help="取中位数的轮数（另有 1 轮预热不计）")

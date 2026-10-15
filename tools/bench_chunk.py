@@ -34,6 +34,7 @@ from dataclasses import asdict
 
 from localsearch.chunk import estimate_tokens, split
 from localsearch.core.config import ChunkCfg
+from localsearch.core.console import use_safe_output
 
 #: 一篇正文的全部规模与内容都写在这里，一列对齐着看。
 SAMPLES: tuple[tuple[str, str, int], ...] = (
@@ -69,6 +70,8 @@ def timed(text: str, **keywords) -> tuple[list, float, int]:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     config = asdict(ChunkCfg())
     print(f"ChunkCfg：{config}")
 

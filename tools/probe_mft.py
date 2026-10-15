@@ -76,6 +76,8 @@ import sys
 import time
 from pathlib import Path
 
+from localsearch.core.console import use_safe_output
+
 REPO = Path(__file__).resolve().parents[1]
 
 # ===========================================================================
@@ -639,6 +641,8 @@ def filetime(ts: int) -> str:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     args = parse_args(sys.argv[1:])
     setup_output(args.log)
 

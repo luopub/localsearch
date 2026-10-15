@@ -70,6 +70,8 @@ import sys
 import time
 from pathlib import Path
 
+from localsearch.core.console import use_safe_output
+
 # ---------------------------------------------------------------------------
 # 环境必须在 import huggingface_hub **之前**设好（同 tools/fetch_model.py 的道理：
 # 那个库在导入时就把这些值读进配置对象）。所以这里先扫一遍 argv，而不是等
@@ -937,6 +939,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     args = parse_args(sys.argv[1:])
     quieten()
     facts = machine_facts()

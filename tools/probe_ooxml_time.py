@@ -83,6 +83,8 @@ import sys
 import time
 import zipfile
 
+from localsearch.core.console import use_safe_output
+
 #: 子进程里造一份样本（只依赖一个参数：格式名），字节从 stdout 原样带回来。
 #: 写成子进程而不是在进程内连着造两份，理由见模块文档的 ⚠。
 CHILD = r'''
@@ -168,6 +170,8 @@ def report(kind: str) -> None:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     print(f"机器时间（脚本自己取的）：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"两次生成之间睡 {GAP_SECONDS} 秒——不睡的话两次落在同一秒，看着「稳定」"
           "（见模块文档）")

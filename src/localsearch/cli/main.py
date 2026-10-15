@@ -43,6 +43,7 @@ from localsearch.cli.commands.config import config_app
 from localsearch.cli.commands.doctor import doctor
 from localsearch.cli.commands.index import index
 from localsearch.cli.state import CliState
+from localsearch.core.console import use_safe_output
 from localsearch.core.config import (
     Config,
     ConfigError,
@@ -182,7 +183,13 @@ def main(argv: list[str] | None = None) -> int:
     `import click` 拿到的**不是同一个类**——自己写 `except click.ClickException` 会
     一个都接不住。本文件第一版正是这么写的，症状是 `lsearch index` 甩一屏 traceback、
     退出码 1。帮助怎么打印、用法错误为何是 2、Ctrl-C 为何是 130，都归 Typer 自己管。
+
+    **第一行就把输出面设成"编不了就降级"**（`core/console.py`）：`lsearch <子命令>
+    --help` 打印文档串里的 `⚠` 发生在 Typer 回调**之前**，所以这件事挂在回调里来不
+    及；而重定向到文件时 (`lsearch index --help > x.txt`) Python 用 ANSI 代码页，
+    那一行会当场 `UnicodeEncodeError`、退出码 1（2026-10-16 实测，见 `E37`）。
     """
+    use_safe_output()
     args = list(sys.argv[1:] if argv is None else argv)
     try:
         app(args=args)

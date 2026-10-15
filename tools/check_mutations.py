@@ -72,6 +72,8 @@ import pathlib
 import subprocess
 import sys
 
+from localsearch.core.console import use_safe_output
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: 变体表。每一条是"把一处代码改坏，点名的那条测试必须红"。
@@ -358,6 +360,68 @@ MUTATIONS: list[dict[str, object]] = [
                "clone 出来的人拿到的是旧文件。这一条把“提交的字节 = 生成器现在的字节”"
                "钉死（`--check` 是同一个判据的命令行出口）",
     },
+    {
+        "id": "console",
+        "label": "CLI 入口不再给输出面兜底",
+        "file": "src/localsearch/cli/main.py",
+        "old": "    use_safe_output()\n    args = list(",
+        "new": "    args = list(",
+        "tests": ["tests/unit/test_console_output.py"],
+        "expect": "test_cli_entry_calls_the_hatch",
+        "why": "这一条盯的是**静态**那一半（入口里有没有那句调用）。兜底一旦从入口"
+               "消失，`lsearch index --help > x.txt` 就会重新崩在重定向上——但静态"
+               "检查先红，因为它跑的是一条 AST，比真跑一个进程便宜得多",
+    },
+    {
+        "id": "console",
+        "label": "CLI 入口不再给输出面兜底（真跑一条子进程看退出码）",
+        "file": "src/localsearch/cli/main.py",
+        "old": "    use_safe_output()\n    args = list(",
+        "new": "    args = list(",
+        "tests": ["tests/unit/test_console_output.py"],
+        "expect": "test_cli_help_survives_a_gbk_pipe",
+        "why": "同一次改动、另一条测试在盯：它起真进程、管道、GBK 编码跑 `lsearch "
+               "index --help`。这一条才是用户那一档（把帮助重定向到文件）——静态"
+               "那条只证明「有调用」，这条证明「调用真的挡住了崩」",
+    },
+    {
+        "id": "console",
+        "label": "兜底自己把 `errors` 设成 strict（等于不降级）",
+        "file": "src/localsearch/core/console.py",
+        "old": '            reconfigure(errors="replace")',
+        "new": '            reconfigure(errors="strict")',
+        "tests": ["tests/unit/test_console_output.py"],
+        "expect": "test_the_hatch_degrades_instead_of_raising",
+        "why": "`errors` 是这一层的**全部**：改成 strict 之后 `use_safe_output()` "
+               "照样能调、照样返回，只有编不出的那一刻才炸——一条「装了兜底就不崩」"
+               "的测试是唯一抓得住它的东西",
+    },
+    {
+        "id": "console",
+        "label": "`check_mutations.py` 自己不再兜底",
+        "file": "tools/check_mutations.py",
+        "old": "    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉\n"
+               "    use_safe_output()\n",
+        "new": "",
+        "tests": ["tests/unit/test_console_output.py"],
+        "expect": "test_every_tool_with_a_main_calls_the_hatch",
+        "why": "静态那一半按**文件名**参数化，17 个工具各一条；它抓的是「新写的脚本"
+               "又漏一次」这个形态——`check_mutations.py` 自己就是这么漏的（它全部"
+               "变体都抓到的那次跑法，退出码是 1）",
+    },
+    {
+        "id": "console",
+        "label": "`scan_report.py` 不再兜底（真跑一次非子进程）",
+        "file": "tools/scan_report.py",
+        "old": "    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉\n"
+               "    use_safe_output()\n",
+        "new": "",
+        "tests": ["tests/unit/test_console_output.py"],
+        "expect": "test_the_tools_survive_a_gbk_pipe",
+        "why": "这条走的是**真子进程**那一半：`tools/scan_report.py --help` 会打印"
+               "模块文档串，里面有 `⚠`，在 GBK 管道下退出码 1（2026-10-16 实测；"
+               "`0dcb708` 当年只修了它的账目行，够不着 `--help`）",
+    },
 ]
 
 
@@ -521,6 +585,8 @@ def _self_test() -> int:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     parser = argparse.ArgumentParser(description="变体检查：改坏一处代码，点名的测试必须红")
     parser.add_argument("--only", help="只跑这个 id 的变体（默认全跑）")
     parser.add_argument("--list", action="store_true", help="只列出变体，不改任何文件")

@@ -59,6 +59,7 @@ from datetime import datetime
 
 from charset_normalizer import from_bytes
 
+from localsearch.core.console import use_safe_output
 from localsearch.extract.base import SHORT_BYTES, decode_bytes
 
 #: 逐长度截取用的中文句子。**确定性语料**，换它就要连文档里的数一起换。
@@ -171,6 +172,8 @@ def measure_all(series: list[tuple], rounds: int) -> list[list[float]]:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(
         description="F3-01 编码判定微基准（纯内存、不碰盘；SHORT_BYTES 的复跑依据）")
     ap.add_argument("--min-chars", type=int, default=2, help="逐长度截取的起点（字数）")

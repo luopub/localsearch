@@ -51,6 +51,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from localsearch.core.console import use_safe_output
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 MANIFEST = FIXTURES / "MANIFEST.toml"
@@ -490,6 +492,8 @@ def listing(samples: list[dict[str, Any]] | None = None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     parser = argparse.ArgumentParser(description="造 / 比 tests/fixtures/ 里的样本")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--check", action="store_true", help="只比不写；有漂移退出码 1")

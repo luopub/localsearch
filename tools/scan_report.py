@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from localsearch.core.config import load_config
+from localsearch.core.console import use_safe_output
 from localsearch.ingest.base import ScanConfig, ScanStats
 from localsearch.ingest.filters import PROJECT_ROOT, IgnoreRules
 from localsearch.ingest.report import (
@@ -134,6 +135,8 @@ def print_stats(stats: ScanStats) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("roots", nargs="*", help="要扫的目录（默认为配置里的 [paths] roots）")
     ap.add_argument("--ignore-file", default=str(PROJECT_ROOT / ".lsearchignore"))

@@ -42,6 +42,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from localsearch.core.console import use_safe_output
 from localsearch.ingest.filters import IgnoreRules, _decide_reference
 
 REPO = Path(__file__).resolve().parent.parent
@@ -78,6 +79,8 @@ def make_corpus(n: int, seed: int) -> list[tuple[str, bool]]:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     ap = argparse.ArgumentParser(description="F2-03 规则判定微基准（纯内存，不碰磁盘）")
     ap.add_argument("--paths", type=int, default=4000, help="合成语料的路径条数")
     ap.add_argument("--repeat", type=int, default=25, help="每条路径判定的轮数")

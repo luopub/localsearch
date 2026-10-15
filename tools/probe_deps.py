@@ -31,6 +31,8 @@ import sys
 import time
 import warnings
 
+from localsearch.core.console import use_safe_output
+
 # ---------------------------------------------------------------------------
 # 极简的结果收集。刻意不用第三方测试框架：这是"实测探针"，不是单测，
 # 输出要能直接当报告读。
@@ -397,6 +399,8 @@ def print_summary() -> int:
 
 
 def main() -> int:
+    # 输出面兜底（core/console.py）：管道 / 重定向下不许因多字节字符崩掉
+    use_safe_output()
     print_header()
     probe_faiss()
     probe_hnswlib()
