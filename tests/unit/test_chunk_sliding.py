@@ -152,11 +152,25 @@ def test_no_content_is_lost_between_adjacent_chunks():
 
 
 def test_no_chunk_is_empty_or_all_whitespace():
-    chunks = counted(MIXED * 30, 40, ratio=0.15)
+    """⚠ 样本开头那句 `" " * 50` 是**补出来的**（2026-10-16）：只用 `MIXED * 30`
+    时，每一片窗口里都含着正文，规则 4 的"整片空白就跳过"那一半分支根本没走到——
+    `tools/check_mutations.py` 里"整片空白的窗口不再跳过"那条变体**一条测试都没红**。
+    加一段比窗口还长的空白之后，这条测试才真的是那一行的护栏。"""
+    chunks = counted(" " * 50 + MIXED * 30, 40, ratio=0.15)
 
     for chunk in chunks:
         assert chunk.text != ""
         assert chunk.text.strip() == chunk.text
+
+
+def test_a_window_that_is_entirely_whitespace_is_skipped():
+    """整片窗口都落在空白里时那一片**不产出**，而且它前面的空白不进任何一片的偏移。
+    50 个空格按 10 个一片正好是 5 整片，所以第一片的偏移从 50 起。"""
+    text = " " * 50 + run(40)
+    chunks = counted(text, 10)
+
+    assert len(chunks) == 4
+    assert (chunks[0].char_start, chunks[0].char_end) == (50, 60)
 
 
 def test_the_whitespace_at_the_edges_is_trimmed_and_the_offsets_follow():
