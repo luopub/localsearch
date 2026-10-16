@@ -50,7 +50,8 @@ from rich.console import Console
 from rich.markup import escape
 
 from localsearch.cli.state import CliState
-from localsearch.core.config import TiersCfg
+from localsearch.core.config import Config, TiersCfg
+from localsearch.embed.base import EmbedUnavailable, create_embedder
 from localsearch.index.sqlite_store import (
     ChunkHit,
     ChunkSearch,
@@ -66,7 +67,10 @@ from localsearch.index.tier import (
     target_tier,
     tier_name,
 )
-from localsearch.search.tier import MODES, ModeUnavailable, Readiness, resolve
+from localsearch.index.vectors_faiss import INDEX_FILENAME, VectorIndex, VectorIndexError, VectorSpec
+from localsearch.search import semantic
+from localsearch.search.semantic import SemanticSearch
+from localsearch.search.tier import MODES, ModeNotReady, ModeUnavailable, Readiness, resolve
 
 EXIT_OK = 0
 #: 与 `cli/main.py`、`cli/commands/index.py` 同一个惯例值（Click 对用法错误的取值）。
@@ -113,7 +117,9 @@ def search(
         ledger = ledger_from(store.tier_counts())
         try:
             readiness = resolve(requested, ledger, tiers=config.tiers, explicit=explicit)
-        except ModeUnavailable as exc:
+        except (ModeUnavailable, ModeNotReady) as exc:
+            # 两种拒绝同一个出口：缺代码（`ModeUnavailable`）与缺数据（`ModeNotReady`）
+            # 的**下一步**不同，但对命令行来说都是"这一趟不给你跑"，退出码 2。
             typer.secho(str(exc), fg="red", err=True)
             raise typer.Exit(EXIT_USAGE) from exc
         except ValueError as exc:
@@ -122,9 +128,74 @@ def search(
             typer.secho(f"配置里的 search.mode 不认识：{exc}", fg="red", err=True)
             raise typer.Exit(EXIT_USAGE) from exc
 
+        if readiness.mode == "semantic":
+            # 语义这一路：查的是向量，不查 FTS。`hybrid` 在 `F5-05` 之前不会落到这里
+            # （`resolve()` 只会给 lexical / semantic），所以这一个分支就够。
+            _search_semantic(query, config=config, store=store, top_k=top_k, readiness=readiness, ledger=ledger)
+            return
+
         paths = store.search_paths(query, limit=top_k)
         chunks = store.search_chunks(query, limit=top_k)
         render(readiness, paths, chunks, store=store, ledger=ledger, tiers=config.tiers)
+
+
+def _search_semantic(
+    query: str,
+    *,
+    config: Config,
+    store: SqliteStore,
+    top_k: int,
+    readiness: Readiness,
+    ledger: TierLedger,
+) -> None:
+    """语义检索：载入向量索引、嵌入查询、按意思找。
+
+    ⚠ `resolve()` 已经保证"有东西可查"（否则是 `ModeNotReady`，上层已接住）。这里仍然
+    要接 `VectorIndexError`：那是**文件**层面的事（不存在 / 与配置对不上），台账看不见。
+    """
+    try:
+        index = VectorIndex.load(config.index_dir_path() / INDEX_FILENAME, VectorSpec.from_config(config))
+    except VectorIndexError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(EXIT_USAGE) from exc
+    try:
+        embedder = create_embedder(config.embed)
+    except EmbedUnavailable as exc:
+        typer.secho(f"嵌入模型不可用：{exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_USAGE) from exc
+    try:
+        result = semantic.search(query, store=store, index=index, embedder=embedder, limit=top_k)
+    finally:
+        index.close()
+
+    _render_notes(readiness, ledger, tiers=config.tiers)
+    if result.blank:
+        console.print("\n[bold]这个查询是空的[/bold]：只有空白。搜一句话或一个词都行。")
+        return
+    _render_semantic(result)
+
+
+def _render_semantic(result: SemanticSearch) -> None:
+    """按意思命中的那些。**与 `_render_chunks` 同一种分堆**不成立：这里每一片都带自己的
+    相似度，同一个 blob 的几片各自单独列——相似度的高低是这一路的信息，合并掉就丢了。
+    """
+    console.print(f"\n[bold]按意思[/bold]  {len(result.hits)} 片")
+    if result.dropped:
+        # 见 `search/semantic.py` 的模块文档：孤儿或被删的切片。不说的话，少掉的那几条
+        # 去哪了终端上没有任何东西能解释。
+        console.print(
+            f"  [dim]有 {result.dropped} 条命中在库里找不到对应的片段（孤儿向量或已删除），已丢弃[/dim]"
+        )
+    if not result.hits:
+        console.print("  （一条都没有）")
+        return
+    for hit in result.hits:
+        paths = hit.paths
+        head = paths[0] if paths else "（没有路径指着它？）"
+        extra = f"（另有 {len(paths) - 1} 个路径指着同一份内容）" if len(paths) > 1 else ""
+        console.print(f"  {escape(head)}{escape(extra)}")
+        console.print(f"    [dim]相似度 {hit.score:.3f}[/dim]")
+        console.print(f"    {escape(_snippet(hit.chunk.text, ()))}")
 
 
 def render(

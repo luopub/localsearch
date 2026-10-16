@@ -79,15 +79,16 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:  # 只为标注，为了不让 `index` 这一层白白拖进 `embed` 的导入面
-    from localsearch.embed.base import Embedder
+    from localsearch.embed.base import Embedder, TaskPrefixes
     from localsearch.index.sqlite_store import SqliteStore
 
 __all__ = [
     "TEXT_HASH_ALGO",
     "CachePlan",
+    "InputBuilder",
     "VectorCache",
     "document_key",
     "plan_lookup",
@@ -100,6 +101,22 @@ TEXT_HASH_ALGO = "blake2b-128"
 
 #: 摘要字节数。128 位——理由与账见模块文档第二节。
 _DIGEST_BYTES = 16
+
+
+class InputBuilder(Protocol):
+    r"""**能给出"喂进模型的那串字符"的东西**——这一层对它的全部要求。
+
+    它**不是** `Embedder`：`F5-04` 的 Tier2 那一趟在**父进程**里算缓存键，而父进程
+    手上没有嵌入器（多进程那一条路上模型只在 worker 里加载）。它手上有的是一份
+    `TaskPrefixes`，而"前缀 + 正文"这件事**本来就只是前缀的函数**
+    （`embed/base.py` 的 `TaskPrefixes.document_input()`）。
+
+    ⚠ 把它写成协议而不是"也收一个 `TaskPrefixes`"，是为了让**只有一个方法**这件事
+    成为类型上可见的约束：`document_key()` 用不到嵌入器的任何别的东西，它也**不该**
+    用——一旦它开始问 `dim` / `encode_*`，父进程那条路就装不出来了。
+    """
+
+    def document_input(self, text: str, title: str | None = None) -> str: ...  # pragma: no cover
 
 
 def text_hash(text: str) -> str:
@@ -120,7 +137,11 @@ def text_hash(text: str) -> str:
     return f"{TEXT_HASH_ALGO}:{digest.hexdigest()}"
 
 
-def document_key(embedder: Embedder, text: str, title: str | None = None) -> str:
+def document_key(
+    embedder: Embedder | TaskPrefixes | InputBuilder,
+    text: str,
+    title: str | None = None,
+) -> str:
     r"""一条待嵌文档的缓存键。**取键只有这一个入口。**
 
     它做的事只有一件：把"实际喂给模型的字符"问出来（`document_input()`）再摘要。
@@ -128,6 +149,10 @@ def document_key(embedder: Embedder, text: str, title: str | None = None) -> str
     有名字的函数**。少了它，调用方会写 `text_hash(prefix + chunk.text)`，而
     `prefix` 从哪来、要不要带标题、标题里换行怎么办，就成了第二处实现；那一处的
     错法是静默的（模块文档第一节）。
+
+    第一个参数收三种东西，都是"能给出那串字符"的（见 `InputBuilder`）：带嵌入器的
+    调用方（查询侧）给嵌入器，`F5-04` 的 Tier2 那一趟给一份 `TaskPrefixes`
+    （父进程没有嵌入器）。三种在运行时**没有区别**——都是调一个同名方法。
 
     `title` 的表达与 `encode_documents()` 一致：`None`、空串、只有空白的标题都得到
     `title: none` 那一个槽，因此**共享同一个键**——喂给模型的东西确实一模一样。

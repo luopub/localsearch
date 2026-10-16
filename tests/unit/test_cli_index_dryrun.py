@@ -539,19 +539,18 @@ def test_all_drives_is_refused_with_the_measured_reason(
 def test_options_that_nothing_can_honour_are_not_declared(
     sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--workers` / `--rebuild` / `--prune` **故意没声明**，报的是用法错误。
+    """`--prune` **故意没声明**，报的是用法错误。
 
-    计划 §4.6 给 `index` 列了它们，但这一版兑现不了：`--workers` 是**嵌入**的并行
-    （Tier1 那一段是单进程顺序跑，`P5` 才有意义），`--rebuild` / `--prune` 要"按路径
-    删行"，那条路要处理 `files_fts` 的孤儿行与 `R14` 的"只在真正可达的卷内删"
-    （归 `F6-03`）。声明了却不用，用户读到的是一句谎话（`--workers 8` 给了、没反应）；
-    **偷偷忽略**更糟——同类的先例是 `backend = "mft"` 直接报错而不是静默按 scandir 跑。
+    计划 §4.6 给 `index` 列了它，但这一版兑现不了：它要"按路径删行"，那条路要处理
+    `files_fts` 的孤儿行与 `R14` 的"只在真正可达的卷内删"（归 `F6-03`）。声明了却不用，
+    用户读到的是一句谎话（`--prune` 给了、没反应）；**偷偷忽略**更糟——同类的先例是
+    `backend = "mft"` 直接报错而不是静默按 scandir 跑。
 
-    ⚠ 这一条在 `F4-04` **缩过一次**：原先里面还有 `--tier` 与 `--resume`，它们随真索引
-    一起落地了（行为在 `test_index_resume.py` 的 CLI 那一段里逐条钉住）。名单要跟着
-    缩小——留着的话，这条测试会挡一个已经不存在的"没实现"。
+    ⚠ 这一条在 `F4-04` **缩过一次**，在 `F5-04` 又缩过一次：`--workers` 与 `--rebuild`
+    已经兑现（向量那一级），不再是"没实现"。名单要跟着缩小——留着的话，这条测试会挡一个
+    已经存在的参数。
     """
-    for option in ("--workers", "--rebuild", "--prune"):
+    for option in ("--prune",):
         code, out, err = run(sandbox, capsys, "index", option, "8")
         assert code == 2, f"{option} 被声明了，而这一版兑现不了它"
         assert "No such option" in flat(out + err)

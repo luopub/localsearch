@@ -131,6 +131,7 @@ __all__ = [
     "prefixes_from_file",
     "prefixes_from_prompts",
     "resolve_backend",
+    "resolve_prefixes",
 ]
 
 # ==============================================================================
@@ -252,6 +253,22 @@ class TaskPrefixes:
             # 而写成 `title:    | text:` 只会多几个噪声 token。
             return self.document
         return self.document.replace(TITLE_NONE, f"title: {cleaned}")
+
+    def document_input(self, text: str, title: str | None = None) -> str:
+        r"""这条文档**实际喂给模型的那串字符**：文档前缀 + 正文。
+
+        `F5-04` 把这半句拼装从嵌入器挪到了这里，理由只有一条：**前缀是模型的属性，
+        不是那个已经加载好的对象的属性**。`F5-03` 的缓存键要在**父进程**里算出来
+        （"要不要嵌"必须在动手之前定），而父进程手上**没有**嵌入器——多进程那一条路上
+        模型只在 worker 里加载（`embed/batching.py`），父进程再加载一份要 1.81 GiB
+        （`E41a`），而那笔内存正好是 worker 预算算完之后才有的。
+
+        于是：`F5-03` 的 `document_key()` 收的可以是一个 `TaskPrefixes`（它只要求
+        "能给出喂进模型的那串字符"），嵌入器实例只是**碰巧也**能给出它而已。
+        ⚠ 反过来说，**前缀拼装仍然只有这一处实现**——`BatchEmbedder.document_input()`
+        已经是转手调用本方法。两处各拼一遍的失败形态是静默的（见那一处的文档）。
+        """
+        return self.document_prefix(title) + text
 
 
 def prefixes_from_prompts(
@@ -521,16 +538,16 @@ class BatchEmbedder(ABC):
     def document_input(self, text: str, title: str | None = None) -> str:
         r"""这条文档**实际喂给嵌入器的那串字符**：文档前缀 + 正文。
 
-        `F5-03` 加的。存在的理由是**它必须只有一处实现**：`encode_documents()` 用它拼
-        输入，`index/vector_cache.py` 用它算缓存键。两处各拼一遍的失败形态是**静默**的
-        ——算键那边少拼了前缀，于是"标题不同、正文相同"的两条文档撞成同一个键，第二条
-        复用第一条的向量，**标题就被悄悄丢掉了**：搜不到、不报错。
+        `F5-03` 加的，`F5-04` 起是**转手**：真正的拼装搬到了
+        `TaskPrefixes.document_input()`（理由写在那里——父进程要在没有嵌入器的前提下
+        算缓存键）。这一层留着这个方法是给 `Embedder` 协议用的：带着嵌入器的调用方
+        （比如查询侧）不必知道前缀住在哪个对象上。
 
-        `title` 走 `TaskPrefixes.document_prefix()`，所以 `None`、空串、只有空白的
-        标题得到的是**同一串字符**（`title: none`）——也就是说它们共享一个缓存键，
-        这是对的：喂给模型的东西确实一模一样。
+        ⚠ 它仍然必须与 `encode_documents()` 走**同一个**拼装：两处各拼一遍的失败形态
+        是**静默**的——算键那边少拼了前缀，于是"标题不同、正文相同"的两条文档撞成
+        同一个键，第二条复用第一条的向量，**标题就被悄悄丢掉了**：搜不到、不报错。
         """
-        return self.prefixes.document_prefix(title) + text
+        return self.prefixes.document_input(text, title)
 
     def encode_documents(
         self, texts: Sequence[str], titles: Sequence[str | None] | None = None
@@ -597,6 +614,39 @@ def resolve_backend(name: str) -> str:
     字符串——那种错该在工厂里报，好把"有哪些后端"一起说出来。
     """
     return DEFAULT_BACKEND if name == "auto" else name
+
+
+def resolve_prefixes(
+    cfg: EmbedCfg, *, model_dir: str | Path | None = None
+) -> TaskPrefixes:
+    r"""**只读快照里那一份前缀 JSON**，不加载任何权重（`F5-04`）。
+
+    存在的理由只有一条：索引那一趟要在**父进程**里算出 `F5-03` 的缓存键，而父进程
+    手上没有嵌入器（`A2` 的多进程那一条路上模型只住在 worker 里）。它要的其实只有
+    "前缀 + 正文"这一个拼装（`TaskPrefixes.document_input()`），而前缀是**模型的属性**、
+    住在快照的一个 JSON 文件里，不必靠加载 1.81 GiB 的权重才能知道。
+
+    ⚠ 两个后端各有自己的 `resolve_snapshot()`（仓库 id 不同，见那两个函数的文档），
+    这里只做分发。**不在这里写一份"按后端挑仓库"的表**：那样"我这个后端从哪个仓库
+    加载"就有两处实现，而它们漂开的症状是"算键时读的是 A 仓库的前缀、嵌入时用的是
+    B 仓库的前缀"——**不报错**，缓存命中率从此永远偏低，且看不出来。
+
+    它与 `create_embedder()` 的关系是"同一件事的两半"：那一半给出**能算向量的对象**，
+    这一半给出**算缓存键要的那串字符**。两半都从同一份快照读前缀，所以两边算出来的
+    键一致——这正是缓存能命中的前提。
+    """
+    backend = resolve_backend(cfg.backend)
+    if backend == "onnx":
+        from localsearch.embed.gemma_onnx import resolve_snapshot
+
+        snap = resolve_snapshot(model_dir)
+    elif backend == "sentence_transformers":
+        from localsearch.embed.gemma_st import resolve_snapshot
+
+        snap = resolve_snapshot(model_dir, model_id=cfg.model_id)
+    else:  # pragma: no cover - `create_embedder()` 会先把话说全，这里是同一句话
+        raise EmbedUnavailable(f"不认识的嵌入后端 {cfg.backend!r}（解析后是 {backend!r}）")
+    return prefixes_from_file(snap / PREFIX_CONFIG_FILE)
 
 
 def create_embedder(

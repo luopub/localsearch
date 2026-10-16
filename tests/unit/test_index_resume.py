@@ -41,6 +41,7 @@ from localsearch.core.config import (
 )
 from localsearch.core.logging import reset_logging
 from localsearch.core.models import ExtractedDoc
+from localsearch.embed.base import EmbedUnavailable
 from localsearch.core.registry import Registry
 from localsearch.extract import ExtractConfig, Extractor
 from localsearch.index.build import (
@@ -650,7 +651,11 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         # 绝对路径：见上面 IGNORE_LINES 那段（相对名字会被解析到仓库根）
         f'ignore_file = "{ignore.as_posix()}"\n'
         "[perf]\n"
-        "commit_every_files = 2\n",
+        "commit_every_files = 2\n"
+        # 默认关掉语义那一级：这一文件钉的是 Tier0 / Tier1 的命令面，不该去加载 14 GB 的
+        # 模型。Tier2 的命令面在下面用 `no_embedder` 桩单独钉。
+        "[tiers]\n"
+        "semantic = false\n",
         encoding="utf-8",
     )
     monkeypatch.delenv(ENV_CONFIG_PATH, raising=False)
@@ -668,6 +673,25 @@ def cli(sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], *argv: str
 def flat(text: str) -> str:
     """压成一行再断言（rich 画的表格会折行，原文比对会飘）。"""
     return " ".join(text.split())
+
+
+def semantic_on(sandbox: dict[str, Path]) -> None:
+    """把 `sandbox` 的配置改回模板缺省（`semantic = true`）。只给要测 Tier2 的那几条用。"""
+    text = sandbox["cfg"].read_text(encoding="utf-8")
+    sandbox["cfg"].write_text(text.replace("semantic = false", "semantic = true"), encoding="utf-8")
+
+
+@pytest.fixture
+def no_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把嵌入进程换成一构造就报 `EmbedUnavailable` 的桩——等价于"模型不在本机"，但**确定**。
+
+    真模型在开发机的 `HF_HOME` 里，不把它换掉的话，这些测试的结果就取决于那份缓存在不在。
+    """
+
+    def refuse(*_args, **_kwargs):
+        raise EmbedUnavailable("测试桩：这条测试不该（或不能）走到嵌入")
+
+    monkeypatch.setattr("localsearch.index.build.EmbedPool", refuse)
 
 
 def db_of(sandbox: dict[str, Path]) -> Path:
@@ -717,32 +741,49 @@ def test_a_real_run_keeps_going_when_one_file_is_broken(
     assert "有文件没成" in flat(err)
 
 
-def test_the_config_ceiling_is_announced_not_refused(
-    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
+def test_the_default_run_reaches_tier2_and_says_so_when_the_model_is_missing(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], no_embedder: None
 ) -> None:
-    """配置里 `semantic = true`（模板缺省）→ **压到 Tier1 并说出来**，不是拒绝。
+    """配置里 `semantic = true`（模板缺省）：默认 `lsearch index` **会去做向量那一级**。
 
-    两件相反的处理，判据是"这句话是不是人说的"（与 `search/tier.py` 的 `explicit` 同
-    一条）：默认配置不压低的话 `lsearch index` 开箱即报错；而**不说**的话，用户拿到的
-    报告看起来是"索引跑完了"，Tier2 却是空的。
+    模型不在本机时，Tier0 / Tier1 已经提交、是完好的，所以这一趟**退出码 2 并说清楚**
+    （`EmbedUnavailable` 的出口），而不是崩溃，也不是悄悄停在 Tier1 装作跑完了。
     """
+    semantic_on(sandbox)
     code, _out, err = cli(sandbox, capsys, "index")
-    assert code == 1  # 树里有坏文件，退出码与这一条无关
+    assert code == 2, flat(err)
     text = flat(err)
-    assert "semantic = true" in text and "Tier2" in text and "P5" in text, text
+    assert "语义那一级跑不了" in text and "测试桩" in text, text
+    assert "Tier0 / Tier1 已经正常完成" in text, text
+    with SqliteStore.open(db_of(sandbox)) as store:
+        assert store.count_files(status="fulltext") == 2, "Tier1 已提交的那两个文件不能被这一趟带坏"
 
 
-def test_an_explicit_tier_2_is_refused(
+def test_an_explicit_tier_2_is_refused_when_the_model_is_missing(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], no_embedder: None
+) -> None:
+    """显式 `--tier 2`：模型不在本机 → **退出码 2**，说清楚；已经做完的 Tier0 / Tier1 不动。
+
+    一个人明确要了向量那一级，默默停在 Tier1 会让他拿到"索引跑完了"而 Tier2 是空的。
+    宁可失败，不可错答。
+    """
+    semantic_on(sandbox)
+    code, _out, err = cli(sandbox, capsys, "index", "--tier", "2")
+    assert code == 2 and "语义那一级跑不了" in flat(err), flat(err)
+    assert "Traceback" not in flat(err)
+
+
+def test_an_explicit_tier_2_is_announced_when_the_config_ceiling_is_lower(
     sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """显式 `--tier 2`：**当场拒绝**，退出码 2，并且一个落点都不留。
+    """配置里 `semantic = false` 而命令行要 `--tier 2`：**压到配置允许的那一级并说出来**。
 
-    一个人明确要了向量那一级，说明他要的是"意思相近也能搜到"；默默做到 Tier1 停下，
-    他拿到的报告是"索引跑完了"而 Tier2 是空的。宁可失败，不可错答。
+    判据与 `search` 的 `explicit` 相反的那一半：这里是"配置的上限"与"人的要求"打架，
+    不是模型缺失。压低是对的（配置写了不要），但不说的话，人会以为向量那一级跑过了。
     """
     code, _out, err = cli(sandbox, capsys, "index", "--tier", "2")
-    assert code == 2 and "P5" in flat(err)
-    assert not sandbox["data_dir"].exists(), "拒绝的那条路不许建数据目录"
+    assert code == 1  # 树里有坏文件，退出码与这一条无关
+    assert "被配置压到" in flat(err), flat(err)
 
 
 def test_max_chunks_per_doc_lands_in_the_parser_version(
@@ -804,11 +845,11 @@ def test_undeclared_options_are_unknown_rather_than_silently_ignored(
 ) -> None:
     """计划 §4.6 里有、这一版**故意不声明**的几个参数：Click 报 `No such option`。
 
-    `--workers`（嵌入的并行，`A2`/`P5`）、`--rebuild` / `--prune`（删除路径，`F6-03`）都
-    不做。"声明了却忽略"这一类错的形态是**看起来完全正常**：`--workers 8` 给了、没反应、
-    也不报错，用户会以为它并行跑过了。不声明 + 报错是刻意的，理由在 `index/build.py`。
+    `--prune`（删除路径，`F6-03`）不做。`--workers` / `--rebuild` 在 `F5-04` 已经兑现、
+    不在此列。"声明了却忽略"这一类错的形态是**看起来完全正常**：`--prune` 给了、没反应、
+    也不报错，用户会以为它真删过了。不声明 + 报错是刻意的，理由在 `index/build.py`。
     """
-    for flag in ("--workers", "--rebuild", "--prune"):
+    for flag in ("--prune",):
         code, out, err = cli(sandbox, capsys, "index", flag, "1")
         assert code == 2, f"{flag} 不该被接受"
         assert "No such option" in flat(out + " " + err), flag

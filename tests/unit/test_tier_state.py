@@ -599,9 +599,25 @@ def ready_ledger() -> t.TierLedger:
     return t.ledger_from({("indexed", 2): 3})
 
 
-def test_lexical_is_the_mode_that_works_today() -> None:
-    assert st.IMPLEMENTED_MODES == frozenset({"lexical"})
+def ledger_two_thirds_built() -> t.TierLedger:
+    """7 个文件做到第 1 级，其中 3 个做到了第 2 级——**向量建了一半**。
+
+    这一份台账是 `F5-04` 之后最要紧的一个中间形态：`semantic` 这一级**有东西可查**
+    （所以模式不降级、语义检索真跑），但**没做完**（所以要有那条带数字的标注）。
+    `P4` 时这两种情形分不开（都没有向量），`F5-04` 之后它们的处理**相反**。
+    """
+    return t.ledger_from({("fulltext", 1): 4, ("indexed", 2): 3})
+
+
+def test_the_modes_that_work_today_are_lexical_and_semantic() -> None:
+    """`F5-04` 把 `semantic` 加进 `IMPLEMENTED_MODES`，`hybrid` 仍然要等 `F5-05`。
+
+    ⚠ `hybrid` **不是**"把两段结果拼在一起"：那是 `F4-04` 就能做的事（它正是刻意
+    不做的），缺的是把两路**融**起来的那一步（RRF）。
+    """
+    assert st.IMPLEMENTED_MODES == frozenset({"lexical", "semantic"})
     assert set(st.MODES) == {"lexical", "semantic", "hybrid"}
+    assert "hybrid" not in st.IMPLEMENTED_MODES
 
 
 def test_a_finished_index_needs_no_note_at_all() -> None:
@@ -611,24 +627,70 @@ def test_a_finished_index_needs_no_note_at_all() -> None:
     assert r.notes == ()
 
 
-def test_a_named_semantic_mode_is_refused_rather_than_silently_downgraded() -> None:
-    """⚠ `A8` 里"不允许静默"那半句最要紧的一格。
+def test_a_named_semantic_mode_runs_when_the_vectors_are_there() -> None:
+    """`F5-04` 之后 `--mode semantic` 是一个**能跑**的请求：向量都在，一次都不降级。"""
+    r = st.resolve("semantic", ready_ledger(), tiers=TiersCfg(), explicit=True)
+    assert (r.requested, r.mode, r.degraded) == ("semantic", "semantic", False)
+    assert r.notes == ()
+
+
+def test_a_named_semantic_mode_is_refused_when_no_vector_exists() -> None:
+    r"""⚠ `A8` 里"不允许静默"那半句最要紧的一格，`F5-04` 之后**换了异常**。
 
     一个人明确要了语义检索，说明他要的是"意思相近"，而词法检索会给出一堆**看起来
     合理**的关键词命中——他没有任何办法察觉自己拿到的是另一种东西。宁可失败，
     不可错答。
+
+    ⚠ 这里要的是 `ModeNotReady`（**缺数据**）而不是 `ModeUnavailable`（缺代码）：
+    前者跑一趟 `lsearch index --tier 2` 就好了，后者只能等下一版。两者合成一个
+    异常，就等于把"去跑索引"和"等下一版"说成同一件事（`ModeNotReady` 的文档）。
     """
-    led = ready_ledger()
-    with pytest.raises(st.ModeUnavailable) as caught:
+    led = t.ledger_from({("fulltext", 1): 7})
+    with pytest.raises(st.ModeNotReady) as caught:
         st.resolve("semantic", led, tiers=TiersCfg(), explicit=True)
-    assert caught.value.requested == "semantic"
-    assert caught.value.available == st.IMPLEMENTED_MODES
-    assert "P5" in str(caught.value) and "--mode lexical" in str(caught.value)
+    assert (caught.value.requested, caught.value.tier) == ("semantic", t.TIER_SEMANTIC)
+    assert (caught.value.done, caught.value.expected) == (0, 7)
+    text = str(caught.value)
+    assert "0 / 7" in text and "lsearch index --tier 2" in text
+    assert "--mode lexical" in text, "拒绝要给出路，不然用户只能猜"
+
+
+def test_a_named_semantic_mode_on_an_empty_library_says_what_to_look_at() -> None:
+    """空库上要语义：正确的下一句不是"去建向量"（建了也没有）而是"先建索引"。
+
+    `0 / 7` 与 `0 / 0` 的修法不同——后者跑完 `--tier 2` 也还是没有向量，因为根本没有
+    哪一份文件本该做到那一级。
+    """
+    with pytest.raises(st.ModeNotReady) as caught:
+        st.resolve("semantic", t.ledger_from({}), tiers=TiersCfg(), explicit=True)
+    assert (caught.value.done, caught.value.expected) == (0, 0)
+    assert "lsearch index" in str(caught.value)
+    assert "--tier 2" not in str(caught.value), "空库上让人去建向量是一句办不到的话"
+
+
+def test_switching_the_semantic_tier_off_makes_a_named_semantic_mode_refuse_too() -> None:
+    """配置里 `semantic = false` 时那一级**从来不会做**——与"还没做"是同一句拒绝。
+
+    这一格的判据不能只看台账：`done_at(2)` 也是 0，但原因在配置里，用户要改的是配置。
+    """
+    led = t.ledger_from({("fulltext", 1): 7})
+    tiers = TiersCfg(semantic=False)
+    with pytest.raises(st.ModeNotReady) as caught:
+        st.resolve("semantic", led, tiers=tiers, explicit=True)
+    assert caught.value.tier == t.TIER_SEMANTIC
 
 
 def test_a_named_hybrid_mode_is_refused_too() -> None:
-    with pytest.raises(st.ModeUnavailable, match="hybrid"):
+    """`hybrid` 缺的是**代码**（RRF 归 `F5-05`），所以这一格是 `ModeUnavailable`。
+
+    ⚠ 那句拒绝要说清缺的是哪一块：两个半边各自都能跑，缺的只是"融起来"——
+    含糊地说一句"混合检索还没实现"，用户会以为语义那一半也不能用。
+    """
+    with pytest.raises(st.ModeUnavailable, match="hybrid") as caught:
         st.resolve("hybrid", ready_ledger(), tiers=TiersCfg(), explicit=True)
+    text = str(caught.value)
+    assert "F5-05" in text and "RRF" in text
+    assert caught.value.available == st.IMPLEMENTED_MODES
 
 
 def test_a_configured_semantic_mode_downgrades_and_says_语义未就绪() -> None:
@@ -637,8 +699,12 @@ def test_a_configured_semantic_mode_downgrades_and_says_语义未就绪() -> Non
 
     ⚠ 那句话要说两件事：**出了什么事**（`语义未就绪` + 为什么）与**我拿到的是什么**
     （实际按哪个模式、因此少了什么）。只说"降级了"等于没说——用户要知道的是
-    "我这份结果不是语义检索，换个说法就搜不到"。"""
-    r = st.resolve("semantic", ready_ledger(), tiers=TiersCfg())
+    "我这份结果不是语义检索，换个说法就搜不到"。
+
+    ⚠ `F5-04` 之后这一格只对**向量一条都没有**的库成立（`ready_ledger()` 不再是它的
+    输入）：那一级有东西可查时 `semantic` 一次都不降级，见下一条。"""
+    led = t.ledger_from({("fulltext", 1): 7})
+    r = st.resolve("semantic", led, tiers=TiersCfg())
     assert (r.requested, r.mode, r.degraded) == ("semantic", "lexical", True)
     assert r.has(st.NOTE_MODE_DOWNGRADED)
     (note,) = r.notes
@@ -647,13 +713,45 @@ def test_a_configured_semantic_mode_downgrades_and_says_语义未就绪() -> Non
     assert "换个说法搜不到" in note.message, "要说清用户**因此少了什么**"
 
 
-def test_a_configured_hybrid_mode_downgrades_and_says_语义未就绪() -> None:
-    r = st.resolve("hybrid", ready_ledger(), tiers=TiersCfg())
-    assert (r.mode, r.degraded) == ("lexical", True)
-    (note,) = r.notes
-    assert "语义未就绪" in note.message
-    assert "词法（关键词）" in note.message
-    assert "换个说法搜不到" in note.message
+def test_a_configured_semantic_mode_does_not_downgrade_on_a_half_built_index() -> None:
+    """向量**建了一半**与"一条都没有"是相反的处理——这一条钉住它们分开了。
+
+    `F5-04` 之前这两件事在台账里长得一样（`done_at(2)` 都是 0），于是它们只能是
+    同一个回答。现在不是了：一半的向量**给得出**结果，只是覆盖不全——那是"不完整"
+    （一条带数字的标注），不是"跑不起来"（换模式）。判据由 `_blocked()` 那一行
+    "只问有没有、不问做完没有"划。
+    """
+    r = st.resolve("semantic", ledger_two_thirds_built(), tiers=TiersCfg())
+    assert (r.requested, r.mode, r.degraded) == ("semantic", "semantic", False)
+    assert not r.has(st.NOTE_MODE_DOWNGRADED), "有东西可查就不许降级"
+    assert [n.tier for n in r.notes] == [t.TIER_SEMANTIC], "只要那一条进度标注"
+
+
+def test_a_configured_hybrid_mode_downgrades_to_whichever_half_is_left() -> None:
+    r"""同一个 `hybrid`，台账不同则落到**不同的半边**——而两句话都要说对。
+
+    ⚠ 这一条同时钉住那句降级话**不是写死的**（`_downgrade_message()` 的文档）：
+    它在建好向量的库上说"按语义（向量）检索"，在没建的库上说"按词法（关键词）检索"。
+    写死任何一边，另一边就会变成一处**看起来正常**的错话。
+
+    两种情形**共有**的是前半截原因：`hybrid` 缺的是 RRF（`F5-05`），两个半边各自
+    都能跑——那句原因在两种情况里都成立，所以不许按台账改（它也不许出现任何模式的
+    显示名，否则读起来像在说这一趟会跑哪两个）。
+    """
+    reason = "混合检索还没实现（缺的是把两路结果融起来的 RRF，归 F5-05：那两路各自都能跑）。"
+
+    half = st.resolve("hybrid", ledger_two_thirds_built(), tiers=TiersCfg())
+    assert (half.mode, half.degraded) == ("semantic", True)
+    (downgrade,) = [n for n in half.notes if n.code == st.NOTE_MODE_DOWNGRADED]
+    assert downgrade.message == reason + "这一趟按语义（向量）检索——只按意思相近找，关键词对不上的搜不到。"
+    assert "语义未就绪" not in downgrade.message, "向量有，不能说没有——那正是这一格要分开的"
+
+    none = st.resolve("hybrid", t.ledger_from({("fulltext", 1): 7}), tiers=TiersCfg())
+    assert (none.mode, none.degraded) == ("lexical", True)
+    (downgrade,) = [n for n in none.notes if n.code == st.NOTE_MODE_DOWNGRADED]
+    assert downgrade.message.startswith(reason)
+    assert "语义未就绪" in downgrade.message
+    assert "按词法（关键词）检索" in downgrade.message
 
 
 def test_a_mode_nobody_knows_is_the_callers_bug() -> None:
@@ -725,25 +823,19 @@ def test_a_full_index_that_only_has_terminal_rows_is_still_ready() -> None:
     assert r.notes == ()
 
 
-def test_the_tier2_note_speaks_up_once_semantic_mode_really_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`P5` 落地向量之后**只改一个常量**：把 `semantic` / `hybrid` 加进
-    `IMPLEMENTED_MODES`。这一条把这个假设钉住——那三级消息与降级表都已经写好了，
-    到那天不需要再回来补文案（补文案这种事最容易在"功能已经能跑"之后被忘掉）。"""
-    monkeypatch.setattr(st, "IMPLEMENTED_MODES", frozenset(st.MODES))
-    led = t.ledger_from({("fulltext", 1): 7})
-    r = st.resolve("semantic", led, tiers=TiersCfg(), explicit=True)
+def test_the_tier2_note_speaks_up_on_a_half_built_semantic_index() -> None:
+    """`F5-04` 之后 `semantic` 真能跑，所以这一条不再靠猴子补丁伪造"模式已实现"：
+    台账上向量建了一半，`semantic` 照常执行（不降级、不拒绝），只多一条带数字的标注。
+    那三级消息与降级表是为这一天写好的，这一条把它钉在真实状态上。"""
+    r = st.resolve("semantic", ledger_two_thirds_built(), tiers=TiersCfg(), explicit=True)
     assert r.mode == "semantic" and r.degraded is False
     (note,) = r.notes
     assert note.tier == t.TIER_SEMANTIC
     assert "语义未就绪" in note.message
-    assert "0 / 7" in note.message
+    assert "3 / 7" in note.message
 
 
-def test_hybrid_falls_back_to_semantic_before_lexical_once_vectors_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_hybrid_falls_back_to_semantic_before_lexical_once_vectors_exist() -> None:
     """降级表里那个**顺序**表达的是"谁是谁的子集"，而顺序错了不会报错：`P5` 之后
     如果 `hybrid` 直接落到 `lexical`，用户会失去本来能拿到的那一半语义命中。
 
@@ -751,12 +843,11 @@ def test_hybrid_falls_back_to_semantic_before_lexical_once_vectors_exist(
     `hybrid → semantic` 时说的必须是"按语义（向量）检索"而不是"按词法"。
     写死的话，到 `P5` 那天这句话会变成一处**看起来正常**的错话。
     """
-    monkeypatch.setattr(st, "IMPLEMENTED_MODES", frozenset({"lexical", "semantic"}))
-    r = st.resolve("hybrid", ready_ledger(), tiers=TiersCfg())
+    r = st.resolve("hybrid", ledger_two_thirds_built(), tiers=TiersCfg())
     assert r.mode == "semantic"
-    (note,) = r.notes
-    assert "语义（向量）" in note.message
-    assert "词法" not in note.message
+    (downgrade,) = [n for n in r.notes if n.code == st.NOTE_MODE_DOWNGRADED]
+    assert "语义（向量）" in downgrade.message
+    assert "词法" not in downgrade.message
 
 
 def test_lexical_is_the_floor_that_never_disappears(

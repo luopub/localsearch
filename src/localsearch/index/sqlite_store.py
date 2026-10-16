@@ -114,9 +114,11 @@ from pathlib import Path
 from localsearch.core.models import Chunk
 from localsearch.index.tier import (
     MAX_TIER,
+    STATUS_INDEXED,
     STATUS_MAX_TIER,
     STATUS_MIN_TIER,
     STATUSES,
+    TIER_SEMANTIC,
     work_condition,
 )
 from localsearch.index.tokens import and_expr, query_tokens, tokenize
@@ -134,6 +136,8 @@ __all__ = [
     "BlobWrite",
     "ChunkHit",
     "ChunkSearch",
+    "ChunkText",
+    "VectorReset",
     "FileRow",
     "PathHit",
     "PathSearch",
@@ -206,8 +210,12 @@ _STATUS_WITH_ERROR = "error"
 _SQL_PARAM_LIMIT = 900
 
 
-def _chunked(items: Sequence[str], size: int) -> Iterator[Sequence[str]]:
-    """把一段序列切成每段最多 `size` 个。`find_vectors()` 的 `IN (…)` 要靠它。"""
+def _chunked(items: Sequence[object], size: int) -> Iterator[Sequence[object]]:
+    """把一段序列切成每段最多 `size` 个。`IN (…)` 那几处都靠它。
+
+    ⚠ 收的是 `Sequence[object]`（而不是 `Sequence[str]`）：`F5-04` 起 `IN (…)` 的
+    参数不只有文本哈希，还有 `blob_id` / `vec_label` 这类整数。
+    """
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
@@ -388,6 +396,41 @@ class ChunkHit:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkText:
+    """一片切片的**原文**与它在库里的身份（`F5-04` 的两条路共用）。
+
+    它比 `ChunkHit` 少两样、多一样：
+
+    * **没有 `rank`**：`F5-04` 的两条路（建索引、语义查询）里，"相关度"要么还没算出来
+      （建索引时它不存在），要么是 HNSW 给的内积（与 bm25 不是一个量纲，`VectorHit`
+      的文档里写了）。塞进来只会逼出一句"这个 rank 是哪种"的判断。
+    * **没有 `n_tokens` / `char_start`**：建索引那条路只用得上 `text`，"这段文本在原文
+      的哪一段"是**高亮**（`F5-06`）的事——到那天再加列，比现在先猜一遍要留下的形状便宜。
+    * **多了 `ord`**：同一份内容里切片的顺序。它是 `(blob_id, ord)` 那半个索引的含义，
+      也是"这一批切片有没有漏掉中间一片"唯一能看出来的地方。
+    """
+
+    chunk_id: int
+    blob_id: int
+    ord: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class VectorReset:
+    """`reset_vector_state()` 清掉了什么：缓存条数 / 切片行数 / 文件行数。
+
+    三个数**分开报**是有用的：一次"重建"如果只清掉缓存（`chunks = 0`），说明切片上
+    那些 label 还指着旧索引；只清掉切片（`cached = 0`），说明下一次会把整库重嵌一遍。
+    两个数都该与"这一版索引里有多少条"同量级——差得远就是清错了范围。
+    """
+
+    cached: int
+    chunks: int
+    files: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkSearch:
     """`search_chunks()` 的完整结果。**与 `PathSearch` 同形**，理由也一样：
 
@@ -462,6 +505,17 @@ class SqliteStore:
         个文件调一次，中间不提交——一个文件的三处写入因此落在同一个事务里。
         """
         self._conn.commit()
+
+    def rollback(self) -> None:
+        r"""丢掉当前事务里**还没提交**的写入（与 `commit()` 成对）。
+
+        给 `run_tier2()` 用：一批里的 `set_file_indexed()` 是在嵌入之前写的，嵌入一旦
+        失败（模型不在本机、子进程崩了），这一批的结局就只能撤回——否则 `close()` 的
+        兜底提交会把它们当成"做完了"落盘，而它们一条向量都没有。
+
+        没有开事务时是**空操作**（`sqlite3` 的 `rollback()` 本来就是）。
+        """
+        self._conn.rollback()
 
     def close(self) -> None:
         """提交未提交的事务并关连接。
@@ -1189,6 +1243,200 @@ class SqliteStore:
             "DELETE FROM embed_cache WHERE embed_ver = ?", (embed_ver,)
         )
         return int(cur.rowcount)
+
+    # -------------------------------------------- 切片那一侧（F5-04）
+
+    def chunks_for_blobs(
+        self, blob_ids: Sequence[int]
+    ) -> dict[int, tuple[ChunkText, ...]]:
+        r"""这几份内容的切片，`{blob_id: (切片…)}`，每份按 `ord` 排序。
+
+        `F5-04` 建索引那一趟用它把"这一批文件的切片"一次读出来：**一批一条 `SELECT`**
+        而不是一个文件一条（500 个文件一批就是 500 次往返，而这一趟的瓶颈本该只在
+        嵌入器上）。
+
+        ⚠ **没有切片的 blob 不在字典里**（0 字节文件是合法的：有 blob、没有切片）。
+        调用方用 `.get(blob_id, ())` 而不是 `[blob_id]`——写成下标的话，一个空文件
+        就能让整趟索引停在第一批上，而"这个文件是空的"根本不是错误。
+
+        ⚠ 只返回 `text` 一份原文，不返回 `chunks_fts` 那一份分词结果：喂给嵌入器的
+        是**原文**（`F5-01` 的键就是按"喂进模型的那串字符"算的），而分词那份是小写、
+        带空格的，拿去嵌入等于换了一个模型输入。这与 `ChunkHit.text` 那条同一个理由。
+        """
+        out: dict[int, list[ChunkText]] = {}
+        if not blob_ids:
+            return {}
+        for part in _chunked(blob_ids, _SQL_PARAM_LIMIT):
+            placeholders = ",".join("?" * len(part))
+            rows = self._conn.execute(
+                "SELECT id, blob_id, ord, text FROM chunks"
+                f" WHERE blob_id IN ({placeholders}) ORDER BY blob_id, ord",
+                tuple(part),
+            )
+            for chunk_id, blob_id, ord_, text in rows:
+                out.setdefault(int(blob_id), []).append(
+                    ChunkText(
+                        chunk_id=int(chunk_id),
+                        blob_id=int(blob_id),
+                        ord=int(ord_),
+                        text=str(text),
+                    )
+                )
+        return {blob_id: tuple(items) for blob_id, items in out.items()}
+
+    def chunks_by_labels(self, labels: Sequence[int]) -> dict[int, ChunkText]:
+        r"""`vec_label` → 那一片切片（语义检索那一侧的取回）。
+
+        与 `paths_for_blob()` 的分工：这里回答"这个 label 是哪一片"，那一头回答
+        "这一片属于哪些文件"。两条都必要——`D12` 的去重让一个 label 可能对应好几个
+        路径，而"命中哪一片"与"命中哪个文件"不是一个问题。
+
+        ⚠ **查不到的 label 不报错、只是不在结果里**。查不到有两种来源：索引里有孤儿
+        向量（`check_consistency()` 报的 `orphans`，跨过程崩溃留下的），或者库里那一行
+        被删了。两种情况下调用方要做的都是**丢掉这一条命中**（`.get()` + `continue`），
+        而不是把整个查询判成失败——一条命中的账不对，不该把另外十九条一起废掉。
+        """
+        found: dict[int, ChunkText] = {}
+        if not labels:
+            return found
+        for part in _chunked(labels, _SQL_PARAM_LIMIT):
+            placeholders = ",".join("?" * len(part))
+            rows = self._conn.execute(
+                "SELECT vec_label, id, blob_id, ord, text FROM chunks"
+                f" WHERE vec_label IN ({placeholders})",
+                tuple(part),
+            )
+            for vec_label, chunk_id, blob_id, ord_, text in rows:
+                found[int(vec_label)] = ChunkText(
+                    chunk_id=int(chunk_id),
+                    blob_id=int(blob_id),
+                    ord=int(ord_),
+                    text=str(text),
+                )
+        return found
+
+    def set_chunk_vectors(
+        self, entries: Sequence[tuple[int, int]], *, embed_ver: str
+    ) -> int:
+        r"""把 `(chunk_id, vec_label)` 写进 `chunks.vec_label` / `chunks.embed_ver`。
+
+        **不提交**，返回真正改动的行数。这是"这一片去哪个向量里找它的意思"唯一的写入口。
+
+        `embed_ver` 与 `vec_label` **必须一起写**：`chunks.embed_ver` 非空是"这一片
+        进过向量索引"的判据（`tier.py` 的模块文档把 Tier2 定义在它上面），只写 label
+        会留下一行"有位置、不知道是哪一版模型放的"的记录。
+
+        ⚠ **同一次调用里出现重复的 chunk_id：当场 `StoreError`**（与 `put_vectors()`
+        同源）。那不是竞态，是调用方没对齐——而"一片切片在一次调用里拿到两个 label"
+        意味着后写的那个覆盖前一个，前一个 label 从此是一段谁也指不到的向量。
+        同时 `chunk_id` 不存在时**静默改 0 行**：那不是错误（切片可能刚被 `--prune`
+        删掉），返回值会让调用方看出少了。
+        """
+        if not embed_ver:
+            raise ValueError("embed_ver 不能为空——它是缓存键的一半，也是这一列的判据")
+        seen: set[int] = set()
+        for chunk_id, _label in entries:
+            if chunk_id in seen:
+                raise StoreError(
+                    f"同一次 set_chunk_vectors() 里 chunk_id {chunk_id} 出现了两次："
+                    "后一个 label 会覆盖前一个，而前一个从此是一段没人指得到的向量。"
+                    "先合并再去写。"
+                )
+            seen.add(int(chunk_id))
+        changed = 0
+        for chunk_id, vec_label in entries:
+            cur = self._conn.execute(
+                "UPDATE chunks SET vec_label = ?, embed_ver = ? WHERE id = ?",
+                (int(vec_label), embed_ver, int(chunk_id)),
+            )
+            changed += cur.rowcount
+        return changed
+
+    def count_chunk_vectors(self, *, embed_ver: str | None = None) -> int:
+        r"""有多少片切片进过向量索引（`chunks.vec_label` 非空）。
+
+        它与 `count_vectors()`（`embed_cache` 的条数）**不等**，而且这个差本身就是读数：
+        缓存按**唯一文本**记，切片按**片**记，所以有重复文本时前者一定更小。
+
+        ⚠ 它**不**能当作"索引里有多少条向量"的判据——那个数在索引文件里
+        （`VectorIndex.ntotal`）。两者要一起看：本数 < `ntotal` 说明索引里躺着
+        谁也不指的孤儿向量（跨过程崩溃留下的），本数 > `ntotal` 才是坏事。
+        """
+        if embed_ver is None:
+            row = self._conn.execute(
+                "SELECT count(*) FROM chunks WHERE vec_label IS NOT NULL"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT count(*) FROM chunks WHERE vec_label IS NOT NULL"
+                " AND embed_ver = ?",
+                (embed_ver,),
+            ).fetchone()
+        return int(row[0])
+
+    def set_file_indexed(self, path: str, *, now: int | None = None) -> bool:
+        r"""把一个文件标成"做到了最后一级"（`status = 'indexed'`、`tier = 2`）。
+
+        **不提交**，返回有没有这一行。
+
+        ⚠ 它是 `set_file_extracted()` 的窄包装，存在的理由只有一条：那个方法把
+        `content_hash` 与 `blob_id` **无条件写下去**，而它们的默认值是 `None`——
+        Tier2 那一趟不重新提取，调用方手上没有这两个值，直接调它就等于把这一行
+        **从它的 blob 上摘下来**。后果不是报错：`blob_id = NULL` 之后这一行还认得
+        Tier0 的路径检索，而**正文检索再也找不到它**（`chunks` 是按 blob 挂的，
+        `paths_for_blob()` 找不到这条路径了）。所以这里先把两列读出来、原样传回去。
+        """
+        row = self._conn.execute(
+            "SELECT content_hash, blob_id FROM files WHERE path = ?",
+            (store_path(path),),
+        ).fetchone()
+        if row is None:
+            return False
+        return self.set_file_extracted(
+            path,
+            status=STATUS_INDEXED,
+            tier=TIER_SEMANTIC,
+            content_hash=row[0],
+            blob_id=row[1],
+            now=now,
+        )
+
+    def reset_vector_state(self, *, embed_ver: str) -> VectorReset:
+        r"""把向量那一层清回"还没做过"：缓存、切片上的 label、文件的状态。**不提交**。
+
+        三件事必须在**同一个事务**里做完，顺序也固定：
+
+        1. `embed_cache` 里这一版的行删掉（`delete_vectors()`）；
+        2. `chunks.vec_label` / `chunks.embed_ver` 清成 `NULL`（**只清这一版**的）；
+        3. `files` 里 `tier >= 2 AND status = 'indexed'` 的行退回
+           `status = 'fulltext'`、`tier = 1`。
+
+        少了第 1 步，下一趟全部命中缓存、**一条都不嵌**，而索引是空的——那一批切片
+        永远拿不到向量（每次查都命中、每次都指向不存在的位置）。少了第 2 步，切片上
+        留着一堆指向旧索引的 label。少了第 3 步，Tier2 那一趟**再也挑不到这些文件**
+        （`status = 'indexed'` 与 `tier = 2` 都不在选择条件里），于是"重建"变成一个
+        只对了前半截的动作。
+
+        ⚠ 第 3 步只动 `indexed` 的行，`stale` 不动：`stale` 是"内容变过、要重做"，
+        它本来就会被 Tier2 那一趟挑到（`WORK_STATUSES[TIER_SEMANTIC]` 里有它），
+        在这里顺手把它的 `tier` 压回 1 反而抹掉了"它到过第 2 级"这个事实。
+        归 `--rebuild`（`F5-04`）调。
+        """
+        cached = self.delete_vectors(embed_ver=embed_ver)
+        cur = self._conn.execute(
+            "UPDATE chunks SET vec_label = NULL, embed_ver = NULL WHERE embed_ver = ?",
+            (embed_ver,),
+        )
+        chunks = int(cur.rowcount)
+        cur = self._conn.execute(
+            "UPDATE files SET status = ?, tier = ? WHERE tier >= ? AND status = ?",
+            # ⚠ 这里那个 `'fulltext'` 是字面量而不是常量：同名常量住在
+            # `extract/batch.py`（提取层对自己结局的叫法），而本模块不该反向依赖提取层。
+            # 两处同名常量是 `F5-04` 之前就有的状况，见 P5「遗留」。
+            ("fulltext", TIER_FULLTEXT, TIER_SEMANTIC, STATUS_INDEXED),
+        )
+        files = int(cur.rowcount)
+        return VectorReset(cached=cached, chunks=chunks, files=files)
 
     # ------------------------------------------------------------------ 杂项
 

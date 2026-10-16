@@ -81,6 +81,7 @@ from localsearch.core.config import TiersCfg
 __all__ = [
     "MAX_TIER",
     "STATUSES",
+    "STATUS_INDEXED",
     "STATUS_MAX_TIER",
     "STATUS_MIN_TIER",
     "TERMINAL_STATUSES",
@@ -126,9 +127,18 @@ STATUSES = frozenset(
 )
 
 #: 终态：这两个 status 的**这一轮**到此为止，没有哪一趟会再挑它（`F3-07` 定的分工）。
-#: ⚠ 它们**不是**"永远不再动"：`F6-02` 的变更检测会把改过的文件重新标成 `stale`
+#: ⚠ 它们**不是**"永远不再做"：`F6-02` 的变更检测会把改过的文件重新标成 `stale`
 #: 或 `pending`，那是**另一条**路径（先有"文件变了"这个事实）。
 TERMINAL_STATUSES = frozenset({"skipped", "error"})
+
+#: "这个文件做到了最后一级"（`F5-04` 起是 Tier2）。**不是终态**（`TERMINAL_STATUSES`）
+#: ——它是**成功**的终点，与 `skipped` / `error` 那两个"做不到"的终点正相反，
+#: 而它们三者的共同点是"没有哪一趟会再挑它"。
+#:
+#: ⚠ 它与 `STATUS_MIN_TIER` 绑着：`indexed` ⇒ `tier >= TIER_SEMANTIC`。写 `indexed`
+#: 而 `tier = 1` 会被 `set_file_extracted()` 当场顶回来——那种行意味着"向量做完了"
+#: 与"向量还没做"同时成立，而台账读的是 `tier`、跳过它的是 `status`。
+STATUS_INDEXED = "indexed"
 
 #: 一趟要挑哪些 status 的行。**按 tier 分组**，见 `work_condition()`。
 #:
@@ -140,10 +150,20 @@ TERMINAL_STATUSES = frozenset({"skipped", "error"})
 #: 互相矛盾的行**永远被两边同时漏掉**——它既不算做完（`tier` 没到），也不会被挑中
 #: （`status` 不在名单里），于是它就那样躺在库里，而"就绪"这个标志永远为假。
 #: 用"不是什么"写，矛盾的行会被**重做一遍**，而重做一遍正好把它修好。
+#:
+#: ⚠ Tier2 那条**多减一个 `stale`**（`F5-04` 加的，与上一条的理由相反，所以要说清）。
+#: `stale` 的含义是"内容变过、库里那份是旧的"，而它的切片还是**旧内容**切出来的：
+#: Tier2 如果挑到它，嵌的是旧切片，然后把它记成 `indexed`（`F5-04` 唯一的结局写法），
+#: 于是"内容变过"这个事实被抹掉、台账还会把这一级算成做到了——正是上面那条
+#: "报就绪、其实没有正文"的翻版。`stale` **归 Tier1**（它在 Tier1 的名单里：
+#: 重做一遍会把它变成 `fulltext` + `tier = 1`，那时 Tier2 才该接手）。所以这个减法
+#: 不违反"每个 status 都被某一趟挑到"：`stale` 仍在 Tier1 那一组里。
 WORK_STATUSES: dict[int, frozenset[str]] = {
     TIER_METADATA: frozenset({"pending"}),
     TIER_FULLTEXT: frozenset(STATUSES - TERMINAL_STATUSES - {"pending"}),
-    TIER_SEMANTIC: frozenset(STATUSES - TERMINAL_STATUSES - {"pending", "metadata"}),
+    TIER_SEMANTIC: frozenset(
+        STATUSES - TERMINAL_STATUSES - {"pending", "metadata", "stale"}
+    ),
 }
 
 #: `status` 声称做到的那一级的下界（见模块文档最后一节）。没有列在这里的 status

@@ -70,6 +70,7 @@ __all__ = [
     "ONNX_REPO",
     "OnnxEmbedder",
     "empty_input_for",
+    "resolve_snapshot",
 ]
 
 #: 这份 ONNX 导出所在的位置。与 `[embed] model_id`（= `google/embeddinggemma-2`）
@@ -166,7 +167,7 @@ class OnnxEmbedder(BatchEmbedder):
                 raise EmbedUnavailable("注入了 session 就必须同时给出 prefixes：没有模型文件可读")
             self._model_dir: Path | None = None
         else:
-            self._model_dir = _resolve_snapshot(model_dir)
+            self._model_dir = resolve_snapshot(model_dir)
             if prefixes is None:
                 prefixes = prefixes_from_file(self._model_dir / PREFIX_CONFIG_FILE)
         super().__init__(cfg, prefixes)
@@ -226,12 +227,16 @@ class OnnxEmbedder(BatchEmbedder):
 # ==============================================================================
 
 
-def _resolve_snapshot(model_dir: str | Path | None) -> Path:
+def resolve_snapshot(model_dir: str | Path | None) -> Path:
     """找到 ONNX 快照的本地目录。**只在本地找**（`local_files_only=True`）。
 
     离线是硬约束：`HF_HUB_OFFLINE=1` 由 `bootstrap_env()` 立起来，但本模块**不假设**
     调用方调过它——直接把 `local_files_only` 写在参数上，这样无论环境变量如何，
     这里的解析都只查缓存。首次下载是 `tools/fetch_model.py` 的事（它显式关掉离线）。
+
+    `F5-04` 起是公开的：索引那一趟要在**父进程**里算缓存键，而父进程手上没有嵌入器
+    （多进程那一条路上模型只在 worker 里）。它只需要快照里那一份前缀 JSON，于是
+    `base.resolve_prefixes()` 按后端问到这一个函数——"快照在哪儿"仍然只有一处实现。
     """
     if model_dir is not None:
         path = Path(model_dir)

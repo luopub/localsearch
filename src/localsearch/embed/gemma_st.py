@@ -71,7 +71,7 @@ from localsearch.embed.base import (
     prefixes_from_prompts,
 )
 
-__all__ = ["GemmaSTEmbedder"]
+__all__ = ["GemmaSTEmbedder", "resolve_snapshot"]
 
 #: `[embed] dtype` → torch 的 dtype 名。值是**字符串**而不是 `torch.float32`：
 #: 这个模块的常量不许在导入时就把 torch 拖进来（见 `base.create_embedder` 的文档）。
@@ -129,6 +129,48 @@ class GemmaSTEmbedder(BatchEmbedder):
         回落，得让**进程**退出（`F5-02` 的多进程调度正是这么做的）。"""
         self._model = None
         super().close()
+
+
+def resolve_snapshot(model_dir: str | Path | None, *, model_id: str) -> Path:
+    r"""找到 ST 快照的本地目录。**只在本地找**（`local_files_only=True`）。
+
+    与 `gemma_onnx.resolve_snapshot()` 是**两个**函数，因为它们的仓库不同：这一支是
+    `cfg.model_id`（`google/embeddinggemma-2`，权重与 tokenizer 的源头），那一支是
+    `ONNX_REPO`（同一批权重的 ONNX 导出）。把两者合成一个"按后端挑仓库"的函数看着
+    更整齐，代价是那个函数要知道两个仓库 —— 而"我这个后端从哪个仓库加载"这件事，
+    每个后端自己已经知道一次了（`_load()` 里就是），抄第二份就会漂。
+
+    `model_id` 由调用方显式传（而不是收一个 `EmbedCfg`），是为了与 ONNX 那一支的
+    签名对齐：`base.resolve_prefixes()` 才能用同一句话问两个后端。
+
+    ⚠ 只取 `allow_patterns=[PREFIX_CONFIG_FILE]`：这一支**只读前缀**（`F5-04` 的父进程
+    要算缓存键），不加载权重。不传 `allow_patterns` 时 `snapshot_download` 会把整个
+    快照的清单走一遍，缓存缺件会去联网——实测挂到超时（600 秒后被杀，见 `_load()`）。
+    收窄到那一个文件，缺件当场抛。
+    """
+    if model_dir is not None:
+        path = Path(model_dir)
+        if not path.is_dir():
+            raise EmbedUnavailable(f"model_dir 不是一个目录：{path}")
+        return path
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:  # pragma: no cover - 依赖缺失时的兜底
+        raise EmbedUnavailable(f"没装 huggingface_hub：{exc}") from exc
+    try:
+        return Path(
+            snapshot_download(
+                model_id,
+                allow_patterns=[PREFIX_CONFIG_FILE],
+                local_files_only=True,
+            )
+        )
+    except Exception as exc:
+        raise EmbedUnavailable(
+            f"模型快照不在本机缓存里（{model_id}）。离线运行不会去下载。"
+            f"原始错误：{exc}。"
+            "跑一次 `uv run python tools/fetch_model.py` 可以把它取下来。"
+        ) from exc
 
 
 def _load(cfg: EmbedCfg, model_dir: str | Path | None) -> tuple[Any, TaskPrefixes]:

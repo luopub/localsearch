@@ -1,16 +1,19 @@
-r"""Tier0 / Tier1 那一趟的编排：批量、提交、断点续跑（`F4-04`）。测试落点
-`tests/unit/test_index_resume.py`。
+r"""Tier0 / Tier1 / Tier2 那一趟的编排：批量、提交、断点续跑（`F4-04` / `F5-04`）。
+测试落点 `tests/unit/test_index_resume.py`（前两级）与 `tests/unit/test_vectors.py`（第三级）。
 
-两趟，正好对着 `D10` 的前两级（第三级要向量，归 `P5`）：
+三趟，正好对着 `D10` 的三级：
 
 * **Tier0**（`run_tier0`）——扫一遍盘，把**留着的**条目写进 `files` +
   `files_fts`。不读任何正文，分钟级。被规则排除的条目**一条都不写**（它们不进索引，
   这正是"排除规则是唯一最有效的杠杆"那句话的落点）。
 * **Tier1**（`run_tier1`）——从库里挑"还没做正文"的行，逐个提取、切片、写
   `blobs` / `chunks` / `chunks_fts`，并把结局写回 `files`。
+* **Tier2**（`run_tier2`）——从库里挑"还没做向量"的行，把它们（已经切好的）切片
+  嵌成向量、加进 HNSW、写 `chunks.vec_label`，并把结局写回 `files`。**天级**。
 
-编排里没有一行提取、切片或写库的实现：那些分别在 `extract/`、`chunk/`、
-`index/sqlite_store.py`。这个模块只回答**顺序、批量与中断**三件事。
+编排里没有一行提取、切片、嵌入或写库的实现：那些分别在 `extract/`、`chunk/`、
+`embed/`、`index/sqlite_store.py`、`index/vectors_faiss.py`。这个模块只回答
+**顺序、批量与中断**三件事。
 
 ------------------------------------------------------------------------------
 一批 = 一个事务
@@ -145,31 +148,67 @@ Tier0 **不给目录写行**，三条理由：
 **没有落点**（没有对应的列），所以只在这一趟的报表里计数。要能查出来得等 `P6`。
 
 ------------------------------------------------------------------------------
-这一层**不做**的四件事
+Tier2：先存索引、后提交 SQL（`F5-04`）
 ------------------------------------------------------------------------------
 
-* `--rebuild`（丢掉已有索引重来）要"按路径删行"，而 `files_fts` 的清理还没有主人
-  （`P4` 遗留第 8 条），删除路径归 `F6-03` 的 `--prune`。
-* `--prune`（剔除失效条目）同一条理由，外加 `R14` 那套"只在本次真正可达的卷内删"的
-  判据，那是 `P6` 的活。
-* `--workers`（并行）是**嵌入**的并行（`A2`：worker 数按可用内存与单 worker 实测
-  RSS 算），Tier1 这一段是单进程顺序跑。参数不声明比声明了不用好（见
-  `cli/commands/index.py` 的文档）。
-* Tier2（向量）：`P5`。
+`run_tier2` 每一批的最后三句是 `index.save()` → `set_meta()` → `store.commit()`，
+顺序**不能动**。两个落点（HNSW 文件 / SQLite）分别落盘，中间那个窗口各自留一种
+残留，而两种的后果不对称（`VectorIndex.save()` 的文档算了这笔账）：
 
-四件事都记在 `PROGRESS.md` §4 P4「偏差」里，不在代码里留半个开关。
+* **先存索引**：崩在中间 ⇒ 索引里多了这批向量、库里没有记录。它们成了**孤儿**——
+  浪费一点磁盘，`next_label_hint()` 保证它们的号不被重发。**能接着跑。**
+* **先提交 SQL**：崩在中间 ⇒ `chunks.vec_label` 指着一个索引里不存在的位置，而
+  `F5-03` 的缓存语义是"命中了就不再嵌"——那批切片**永远**拿不到向量，每次都少几条
+  结果，且不报错。唯一能发现它的是下一次打开时的 `check_consistency()`（它当场抛）。
+
+同一个理由决定了 `--rebuild` 的写法：**删索引文件**与**清库里的缓存/label/状态**
+必须成对，前者由 `VectorIndex.open(fresh=True)` 做、后者由
+`reset_vector_state()` 在一个事务里做。少做任何一半，"重建"都只对了一半。
+
+⚠ `save()` 只在真的加了向量时才做。它写的是**整个文件**，而 `faiss.write_index` 是
+O(索引总大小)——全命中缓存的一批（一个字节都没往索引里加）也存一遍，在 `A1` 那套
+两万个文件的规模上就是"每 500 个文件重写一遍几 GB"。
+
+------------------------------------------------------------------------------
+Tier2：`title=None`——切片属于内容，不属于路径
+------------------------------------------------------------------------------
+
+`document_key()` 的第二个参数（标题）在 Tier2 这一趟**一律是 `None`**，而 Tier1 是
+拿 `doc.title` 切片、`D12` 又把同一份内容的切片挂在**一个 blob** 上。理由是同一条：
+同一个 blob 可以被好几个路径指着（`paths_for_blob()`），而标题是**路径**的属性
+（文件名、文档属性）。按路径各算一次键，`D12` 那套去重的收益就整个消失——同一份
+内容有几个副本就嵌几遍。代价是切片级的文档前缀里没有标题（查询侧仍然有它自己的
+查询前缀，两边本来就非对称）。记在 `PROGRESS.md` §5 P5「偏差」里。
+
+------------------------------------------------------------------------------
+这一层**不做**的两件事
+------------------------------------------------------------------------------
+
+* `--prune`（剔除失效条目）要"按路径删行"，而 `files_fts` 的清理还没有主人
+  （`P4` 遗留第 8 条），外加 `R14` 那套"只在本次真正可达的卷内删"的判据——那是
+  `F6-03` 的活。
+* **Tier1 的 `--workers`**：`--workers` 说的是**嵌入**的并行（`A2`），而 Tier1 这一段
+  根本不嵌东西，它是单进程顺序跑（读盘、解析、切片）。所以那个开关在 `F5-04` 之后
+  只对 `--tier 2` 有意义，而它由 `run_tier2()` 转手给 `EmbedPool`。
+
+两件事都记在 `PROGRESS.md` §4 P4「偏差」里，不在代码里留半个开关。
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from itertools import islice
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 from localsearch.chunk.sliding import split
 from localsearch.core.config import ChunkCfg, Config
+from localsearch.embed.base import TaskPrefixes, embed_ver, resolve_prefixes
+from localsearch.embed.batching import EmbedPool, iter_requests
 from localsearch.extract import (
     ExtractConfig,
     Extractor,
@@ -188,8 +227,24 @@ from localsearch.extract.batch import (
 from localsearch.ingest.base import ScanEntry, ScanStats, Scanner
 from localsearch.ingest.filters import Action, IgnoreRules
 from localsearch.ingest.fingerprint import content_hash
-from localsearch.index.sqlite_store import BLOB_CREATED, FileRow, SqliteStore
-from localsearch.index.tier import TIER_FULLTEXT, TIER_METADATA
+from localsearch.index.sqlite_store import (
+    BLOB_CREATED,
+    ChunkText,
+    FileRow,
+    SqliteStore,
+)
+from localsearch.index.tier import TIER_FULLTEXT, TIER_METADATA, TIER_SEMANTIC
+from localsearch.index.vector_cache import VectorCache, document_key
+from localsearch.index.vectors_faiss import (
+    INDEX_FILENAME,
+    META_EMBED_VER,
+    META_NEXT_LABEL,
+    VectorIndex,
+    VectorSpec,
+    bind_embed_ver,
+    check_consistency,
+    next_label,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - 只为类型标注，运行时不需要 core.registry
     from localsearch.core.registry import Registry
@@ -201,10 +256,12 @@ __all__ = [
     "BuildResult",
     "Tier0Stats",
     "Tier1Stats",
+    "Tier2Stats",
     "parser_ver",
     "run",
     "run_tier0",
     "run_tier1",
+    "run_tier2",
     "tier0_status",
 ]
 
@@ -311,12 +368,72 @@ class Tier1Stats:
 
 
 @dataclass(slots=True)
+class Tier2Stats:
+    r"""Tier2 那一趟的账（`F5-04`）。
+
+    ⚠ **这一趟没有"失败的文件"这一栏**，与 Tier0 / Tier1 都不同：Tier1 的失败是
+    "这个文件的正文读不出来"（一个文件一个结局，`A6` 要求不中断整轮），而 Tier2
+    手上只有**已经在库里的切片**——读盘、解析、切片全都做完了。嵌不出来是
+    **整机级**的事（模型不在、内存不够），它该当场抛、由调用方报错退出，
+    而不是记成某个文件的失败。所以《失败》那一栏在这一趟的报表里不该出现。
+
+    四组数，**两种口径不要混**（同 `CachePlan` 的文档）：
+
+    * 按**文件**：`work`、`files_indexed`、`no_blob`；
+    * 按**切片**：`chunks`（这批参与的片数，含重复文本）、`embedded`（真正嵌的）、
+      `cached`（靠缓存与批内去重省下的）；⚠ `cached` **不等于** `chunks - embedded`
+      之外的任何一种拆法，它是 `CachePlan.saved` 的和，已经含了批内去重。
+    """
+
+    #: 这一趟从库里挑出来的文件行数。
+    work: int = 0
+    #: 参与这一趟的切片数（**按片记**，同一段文本重复出现会重复计数）。
+    chunks: int = 0
+    #: 真正送进嵌入器的**唯一文本**条数（去重 + 命中缓存之后剩下的）。
+    embedded: int = 0
+    #: 靠缓存命中与批内去重**少嵌**的条数（`A9` 落在这里，见 `CachePlan.saved`）。
+    cached: int = 0
+    #: 记成 `indexed` 的文件数（Tier2 唯一的成功结局）。
+    files_indexed: int = 0
+    #: 没有任何切片的文件数（0 字节文件、或者提取出的正文为空）。它们照样算做完：
+    #: 没有文本就没有向量，这一级对它们是**空真**。单列一栏是因为"这批文件一条
+    #: 向量都没产出"有两个成因，混在一起会让人以为嵌入器漏了东西。
+    empty: int = 0
+    #: `blob_id` 是 NULL 的行数——它们连切片都挂不上（不正常，但库是可以手改的）。
+    #: 单独记，因为把它们静默当成"做完了"就等于把"这行坏了"藏起来。
+    no_blob: int = 0
+    #: 打开索引时读到的孤儿向量数（索引里有、库里没有哪一行指着）。
+    #: 它由"先存索引、后提交 SQL"这个**刻意**的顺序造出来，无害，但要说出来。
+    orphans: int = 0
+    #: 开这一趟之前 / 之后索引里的向量条数。
+    ntotal_before: int = 0
+    ntotal_after: int = 0
+    #: `--rebuild` 清掉了多少（`VectorReset` 的三个数）。没重建时三个都是 0。
+    reset_cached: int = 0
+    reset_chunks: int = 0
+    reset_files: int = 0
+    #: 实际开了几个嵌入 worker，以及内存算出来的那一份说明（`WorkerPlan.notes`）。
+    workers: int = 0
+    worker_notes: tuple[str, ...] = ()
+    #: 某个 worker 自报的峰值常驻内存（`E8` 同口径的观测值）。
+    observed_peak_bytes: int | None = None
+    commits: int = 0
+    seconds: float = 0.0
+
+    @property
+    def added(self) -> int:
+        """这一趟往索引里加了几条向量。"""
+        return self.ntotal_after - self.ntotal_before
+
+
+@dataclass(slots=True)
 class BuildResult:
     """一趟 `lsearch index` 的完整账。`tier0` 为 `None` 表示这一趟没扫盘（`--resume`）。"""
 
     target_tier: int
     tier0: Tier0Stats | None = None
     tier1: Tier1Stats | None = None
+    tier2: Tier2Stats | None = None
     seconds: float = 0.0
 
     @property
@@ -631,6 +748,226 @@ def _reason(exc: BaseException) -> str:
 
 
 # ==============================================================================
+# Tier2
+# ==============================================================================
+
+
+def run_tier2(
+    store: SqliteStore,
+    *,
+    config: Config,
+    every: int,
+    prefixes: TaskPrefixes | None = None,
+    pool: EmbedPool | None = None,
+    workers: int = 0,
+    rebuild: bool = False,
+    index_path: str | Path | None = None,
+    on_progress: Progress | None = None,
+) -> Tier2Stats:
+    r"""把库里还没做向量的切片嵌完，写进 HNSW（`F5-04`）。
+
+    循环形态与 `run_tier1` **完全一样**（取一批 → 做完 → 提交），理由也一样：这一趟
+    改的正是 `tier` / `status` 那两列，而 `iter_tier_work()` 的选择条件压在
+    `idx_files_tier` 上——**在扫一个索引的同时改它的键**是 SQLite 明说"结果未指定"
+    的那种事。所以每一批都重新问一次库。
+
+    一批之内的顺序是固定的，每一处都对应一个**不报错**的错法：
+
+    1. `store.chunks_for_blobs()`——一批**一条 `SELECT`**（不是一个文件一条）。
+    2. `document_key(prefixes, text)`——缓存键按**喂给模型的那串字符**算。`title=None`：
+       切片属于 **blob**（`D12` 的去重让好几个路径共用一份切片），而标题是**路径**的
+       属性——按路径各算一次键会让去重的收益整个消失，见「与计划的偏差」。
+    3. `cache.plan(keys)`——**先算完"哪些要嵌"再动手**（`F5-03`）。
+    4. 只把 `plan.todo` 喂给 `EmbedPool`，按 `BatchResult.index` 归位。
+    5. `index.add(vectors, labels)`；label 由 `meta` 的计数器发（`next_label()`，
+       并与索引文件里的最大号取大——见那里的文档）。
+    6. `cache.record(plan, labels)` → `plan.labels_in_order()` → 写 `chunks.vec_label`。
+    7. `set_file_indexed()` 把这一批的文件记成 `indexed`。
+    8. **`index.save()` → `set_meta()` → `store.commit()`**：先存索引、后提交。
+       反过来的那个窗口留下的是"库里记着 label、索引里没有"，而 `F5-03` 的缓存语义是
+       "命中了就不再嵌"——那批切片会**永远**拿不到向量，每次都少几条结果，不报错
+       （`VectorIndex.save()` 的文档把两个窗口的账算过）。
+
+    `prefixes` / `pool` / `index_path` 可传是为了测试（不给就按配置现场解析/装配）。
+    ⚠ 两者都是**懒的**：手上没活时既不加载模型、也不去解析快照——一个没什么可做的
+    `--tier 2` 不该先花十几秒把 1.81 GiB 的权重读进来。
+
+    `rebuild=True` 是"丢掉已有那一层重来"：它先把库里的缓存 / label / 状态清干净
+    （`reset_vector_state()`，三件事一个事务），再把索引文件**删掉重建**。⚠ 这两个
+    动作必须**成对**（`VectorCache.clear()` 的文档里写着为什么：缓存说有、索引里没有，
+    会让那批切片永远不再被嵌）。所以 `--rebuild` 是本模块**唯一**有权 `fresh=True`
+    的地方。
+    """
+    stats = Tier2Stats()
+    started = time.monotonic()
+    cfg = config.embed
+    ver = embed_ver(cfg)
+    spec = VectorSpec.from_config(config)
+    path = (
+        Path(index_path)
+        if index_path is not None
+        else config.index_dir_path() / INDEX_FILENAME
+    )
+
+    if rebuild:
+        reset = store.reset_vector_state(embed_ver=ver)
+        stats.reset_cached = reset.cached
+        stats.reset_chunks = reset.chunks
+        stats.reset_files = reset.files
+    index = VectorIndex.open(path, spec, fresh=rebuild)
+    if rebuild:
+        # 索引是空的、库也清干净了，这一版就是它。**有意不走 `bind_embed_ver()`**：
+        # 它的第三种情形（库里记的是另一版模型）正是"换了模型"，而重建的**全部意义**
+        # 就是允许换——旧向量一条不剩，没有可混的东西。走它的话，想换模型的用户会
+        # 被一句"要换模型就得重建"挡住，而他现在做的恰恰就是重建。
+        store.set_meta(META_EMBED_VER, ver)
+    else:
+        bind_embed_ver(store, index, embed_ver=ver)
+    cache = VectorCache(store, ver)
+    stats.orphans = check_consistency(index, cache)
+    stats.ntotal_before = index.ntotal
+    label = next_label(store, hint=index.next_label_hint())
+    previous_first: int | None = None
+    own_pool = pool is None
+
+    try:
+        while True:
+            batch = _take_batch(store, TIER_SEMANTIC, every)
+            if not batch:
+                break
+            first = batch[0].id
+            if first is not None and first == previous_first:
+                # 与 `run_tier1` 同一条守卫：上一批的第一行没被写掉，再转一圈还是它。
+                # 死循环不抛异常，只会把机器占住。
+                raise BuildError(
+                    f"这一批没有推进：id={first} 上一批就在最前面。它的结局没有写进库"
+                    f"（`set_file_indexed()` 改了 0 行？），继续跑会是一个死循环。"
+                )
+            previous_first = first
+
+            dirty = False
+            pieces: list[ChunkText] = []
+            for row in batch:
+                stats.work += 1
+                if row.blob_id is None:
+                    # 一个 `fulltext` 的行本该总有 blob 的。走到这里说明那一行坏了
+                    # （手改过库）。**记一笔再让它离开选择集**：不写结局的话它每一趟
+                    # 都会被挑中，而"每趟都做、每趟都没做"看起来与"做完了"一样。
+                    store.set_file_indexed(row.path)
+                    stats.no_blob += 1
+                    stats.files_indexed += 1
+                    continue
+                blob_chunks = store.chunks_for_blobs((row.blob_id,)).get(row.blob_id, ())
+                if blob_chunks:
+                    pieces.extend(blob_chunks)
+                else:
+                    # 0 字节文件 / 正文为空：没有文本就没有向量，这一级对它是**空真**。
+                    stats.empty += 1
+                store.set_file_indexed(row.path)
+                stats.files_indexed += 1
+
+            stats.chunks += len(pieces)
+            if pieces:
+                if prefixes is None:
+                    prefixes = resolve_prefixes(cfg)
+                keys = [document_key(prefixes, piece.text) for piece in pieces]
+                plan = cache.plan(keys)
+                stats.cached += plan.saved
+                stats.embedded += len(plan.todo)
+                labels: list[int] = []
+                if plan.todo:
+                    dirty = True
+                    if pool is None:
+                        pool = EmbedPool(cfg, workers=workers)
+                        stats.workers = pool.workers
+                        stats.worker_notes = tuple(pool.notes)
+                    vectors = _embed_todo(
+                        pool,
+                        plan.todo,
+                        pieces,
+                        keys,
+                        dim=cfg.dim,
+                        batch_size=cfg.batch_size,
+                    )
+                    labels = [label + i for i in range(len(plan.todo))]
+                    index.add(vectors, labels)
+                    label += len(labels)
+                # 新嵌的那批进 `embed_cache`（`plan.record()` 顺带把"键 → label"记在
+                # `plan` 上）。`todo` 为空时 `record([])` 是**合法**的，不必先判一次
+                # （`CachePlan.recorded` 的文档写着为什么）。
+                cache.record(plan, labels)
+                ordered = plan.labels_in_order()
+                store.set_chunk_vectors(
+                    [
+                        (piece.chunk_id, lbl)
+                        for piece, lbl in zip(pieces, ordered, strict=True)
+                    ],
+                    embed_ver=ver,
+                )
+
+            # 顺序固定：先索引落盘，再提交 SQL（`VectorIndex.save()` 的文档里算了两个
+            # 窗口的账）。`set_meta()` 与 commit 挨着：计数器与"向量进了索引"必须用
+            # 同一条顺序推进。
+            #
+            # ⚠ `save()` **只在真的加了向量时**才做：它写的是**整个文件**，而
+            # `faiss.write_index` 是 O(索引总大小)——全命中缓存的一批（一个字节都没
+            # 往索引里加）也存一遍，在 `A1` 那套两万个文件的规模上就是"每 500 个文件
+            # 重写一遍几 GB"。而这一趟的瓶颈本该只在嵌入器上。
+            if dirty:
+                index.save()
+                store.set_meta(META_NEXT_LABEL, str(label))
+            store.commit()
+            stats.commits += 1
+            if on_progress is not None:
+                on_progress(stats)
+    except BaseException:
+        # 嵌入或写库中途抛错：这一批还没提交的结局（`set_file_indexed` 等）整体撤回，
+        # 否则下面 `finally` 的 `close()` 会把它们当成"做完了"落盘（见上面的说明）。
+        store.rollback()
+        raise
+    finally:
+        if pool is not None:
+            stats.workers = pool.workers
+            stats.worker_notes = tuple(pool.notes)
+            stats.observed_peak_bytes = pool.observed_peak_bytes
+            if own_pool:
+                pool.close()
+        stats.ntotal_after = index.ntotal
+        index.close()
+        stats.seconds = time.monotonic() - started
+    return stats
+
+
+def _embed_todo(
+    pool: EmbedPool,
+    todo: Sequence[str],
+    pieces: Sequence[ChunkText],
+    keys: Sequence[str],
+    *,
+    dim: int,
+    batch_size: int,
+) -> np.ndarray:
+    r"""把 `plan.todo` 里的唯一文本嵌完，返回 `(len(todo), dim)` 的矩阵。
+
+    ⚠ **`todo` 是键、`pieces` 是切片**，两者不是一回事（一批里同一段文本出现三次时
+    `todo` 只有一条）。所以这里必须先按**首次出现的那个键**把文本捡出来，
+    `text_of[key]` 那一步不能省：直接把 `pieces[:len(todo)]` 当作输入，等于把"去重
+    之后的第 i 条"错认成"原始的第 i 条"，而它的后果是**每一条切片都挂上别人的向量**
+    ——搜索结果看着还挺像那么回事（`CachePlan.record()` 的文档串点了同一件事）。
+
+    结果按 `BatchResult.index` 归位（并行走完回来是乱序的，见 `EmbedPool`）。
+    """
+    text_of: dict[str, str] = {}
+    for key, piece in zip(keys, pieces, strict=True):
+        text_of.setdefault(key, piece.text)
+    vectors = np.zeros((len(todo), dim), dtype=np.float32)
+    for result in pool.embed_documents(iter_requests(list(todo), size=batch_size)):
+        start = result.index * batch_size
+        vectors[start : start + len(result.vectors)] = result.vectors
+    return vectors
+
+
+# ==============================================================================
 # 一趟
 # ==============================================================================
 
@@ -647,6 +984,11 @@ def run(
     extract_config: ExtractConfig | None = None,
     now: int | None = None,
     on_progress: Progress | None = None,
+    prefixes: TaskPrefixes | None = None,
+    pool: EmbedPool | None = None,
+    workers: int = 0,
+    rebuild: bool = False,
+    index_path: str | Path | None = None,
 ) -> BuildResult:
     r"""一趟索引：按需跑 Tier0 与 Tier1，交出两级的账。
 
@@ -689,6 +1031,18 @@ def run(
             extract_config=extract_config,
             chunk=config.chunk,
             every=every,
+            on_progress=on_progress,
+        )
+    if target_tier >= TIER_SEMANTIC:
+        result.tier2 = run_tier2(
+            store,
+            config=config,
+            every=every,
+            prefixes=prefixes,
+            pool=pool,
+            workers=workers,
+            rebuild=rebuild,
+            index_path=index_path,
             on_progress=on_progress,
         )
     result.seconds = time.monotonic() - started

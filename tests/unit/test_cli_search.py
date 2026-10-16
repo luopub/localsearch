@@ -81,7 +81,12 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         f'data_dir = "{data_dir.as_posix()}"\n'
         f'roots = ["{tree.as_posix()}"]\n'
         "[scan]\n"
-        f'ignore_file = "{ignore.as_posix()}"\n',
+        f'ignore_file = "{ignore.as_posix()}"\n'
+        # 默认关掉语义那一级：这里钉的是词法那一面的命令接线。若不关，默认 `index` 会去加载
+        # 14 GB 的嵌入模型，而"这台机器上有没有那份缓存"就成了测试结果的一部分。显式
+        # `--mode semantic` 的拒绝路径有测试；**成功的语义检索路径目前没有命令面测试**（P5 遗留）。
+        "[tiers]\n"
+        "semantic = false\n",
         encoding="utf-8",
     )
     monkeypatch.delenv(ENV_CONFIG_PATH, raising=False)
@@ -155,18 +160,24 @@ def test_an_explicit_semantic_mode_is_refused(
     indexed(sandbox, capsys)
     code, out, err = cli(sandbox, capsys, "search", "报告", "--mode", "semantic")
     text = flat(out + " " + err)
-    assert code == 2 and "P5" in text, text
+    # `indexed()` 只建到 Tier1：向量一条都没有，所以是"缺数据"（`ModeNotReady`），
+    # 而不是"缺代码"——下一步是去建索引，不是等 P5。
+    assert code == 2 and "lsearch index --tier 2" in text and "0 / 5" in text, text
     assert "按文件名" not in text, "拒绝的那条路不该打印任何检索结果"
+    assert "Traceback" not in text, "拒绝必须是用法错误，不能是未捕获的异常"
 
 
 def test_an_explicit_hybrid_mode_is_refused_too(
     sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`--mode hybrid` 同样是**人说的**，同样拒绝——判据是 `explicit`，不是"混合有没有
-    实现"。`P5` 之后它会实现，那时这条测试要按「绿灯不自动续期」重写。"""
+    实现"。缺的是 RRF（`F5-05`），不是 `P5` 整体：那句话要点名这个，而不是含糊地说"还没做"。
+    `F5-05` 落地后这条测试要按「绿灯不自动续期」重写。"""
     indexed(sandbox, capsys)
     code, _out, err = cli(sandbox, capsys, "search", "报告", "--mode", "hybrid")
-    assert code == 2 and "P5" in flat(err)
+    text = flat(err)
+    assert code == 2 and "F5-05" in text and "RRF" in text, text
+    assert "Traceback" not in text
 
 
 def test_the_config_default_hybrid_is_downgraded_with_a_note(
@@ -341,11 +352,9 @@ def test_tier2_is_not_complained_about_when_the_config_turns_it_off(
 
     对一个永远不会做的级别一直报"未就绪"，是一句**永远为真的废话**——而永远为真的警告
     会被学会忽略，连带着真警告一起（`search/tier.py` 的模块文档把这条写成了反面）。
+
+    `sandbox` 的配置本来就是 `semantic = false`，所以这里不再追加一行，只做断言。
     """
-    sandbox["cfg"].write_text(
-        sandbox["cfg"].read_text(encoding="utf-8") + "[tiers]\nsemantic = false\n",
-        encoding="utf-8",
-    )
     indexed(sandbox, capsys)
     code, out, _ = cli(sandbox, capsys, "search", "报告", "--mode", "lexical")
     text = flat(out)

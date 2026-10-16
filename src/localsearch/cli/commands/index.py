@@ -14,11 +14,14 @@ r"""`lsearch index`（P2 / `F2-06` 起，P4 / `F4-04` 起是真的索引）。�
 只声明真能兑现的参数
 ------------------------------------------------------------------------------
 
-计划 §4.6 给 `index` 列了 `--workers` / `--rebuild` / `--prune`，本次**一个都不声明**：
+计划 §4.6 给 `index` 列了 `--workers` / `--rebuild` / `--prune`。`F5-04` 起前两个**声明了**，
+`--prune` 仍然**不声明**：
 
 - `--workers` 是**嵌入**的并行（`A2`：worker 数按可用内存与单 worker 实测 RSS 算），
-  Tier1 这一段是单进程顺序跑，`P5` 才有意义；
-- `--rebuild` / `--prune` 都要"按路径删行"，而那条路要处理 `files_fts` 的孤儿行与
+  只对 Tier2 有意义（Tier1 是单进程顺序跑）；
+- `--rebuild` 清掉向量那一级的已有状态（缓存、切片的向量标签、文件的 `indexed` 状态）
+  再从头建。它与 `--resume` / `--dry-run` 说的是相反的事，组合时当场拒绝；
+- `--prune` 要"按路径删行"，那条路要处理 `files_fts` 的孤儿行与
   `R14` 的"只在本次真正可达的卷内删"，归 `F6-03`。
 
 不声明时 Click 给的是 `No such option: --workers`（退出码 2）——明确，只是没解释
@@ -41,17 +44,13 @@ r"""`lsearch index`（P2 / `F2-06` 起，P4 / `F4-04` 起是真的索引）。�
 这一条"变成"这一条不再到期"（`test_cli.py` 里那条测试跟着改成了钉这件事）。
 
 ------------------------------------------------------------------------------
-`--tier`：显式要 Tier2 与配置里写着 `semantic = true` 处理相反
+`--tier`：Tier2 能跑了之后，它与配置里的 `semantic = true` 不再有分歧
 ------------------------------------------------------------------------------
 
-`P4` 没有 Tier2（向量归 `P5`）。两处到不了那一级的路径**故意不一样**，判据是它
-是不是一个人说的（与 `search/tier.py` 的 `explicit` 是同一条判据）：
-
-* **配置里的 `semantic = true`**（这是模板的缺省值）→ **压低到 Tier1 并说出来**。
-  不这么说的话默认配置直接跑不起来，而一个连默认配置都跑不动的工具等于没有。
-* **命令行显式 `--tier 2`** → **当场拒绝**（退出码 2）。一个人明确要了向量那一级，
-  说明他要的是"意思相近也能搜到"；默默做到 Tier1 停下，他拿到的报告看起来是
-  "索引跑完了"，而 Tier2 是空的——宁可失败，不可错答。
+`P4` 时 Tier2 不存在，所以显式 `--tier 2` 与配置里的 `semantic = true` 必须分开处理
+（前者当场拒绝、后者压低到 Tier1 并说出来）。`F5-04` 之后两者都是"**要**那一级"，
+没有压低也没有拒绝的理由。那一级的前提（嵌入模型在本机）由 `_build()` 接住
+`EmbedUnavailable` 报成退出码 2；已经提交的 Tier0 / Tier1 不受影响。
 """
 
 from __future__ import annotations
@@ -68,11 +67,13 @@ from rich.table import Table
 from localsearch.cli.state import CliState
 from localsearch.core.config import Config
 from localsearch.core.logging import setup_logging
+from localsearch.embed.base import EmbedUnavailable
 from localsearch.index.build import (
     BuildError,
     BuildResult,
     Tier0Stats,
     Tier1Stats,
+    Tier2Stats,
     run,
 )
 from localsearch.index.sqlite_store import SqliteStore
@@ -110,9 +111,6 @@ EXIT_OK = 0
 EXIT_FAILURES = 1
 #: "用法不对"的惯例值（与 Click 对用法错误的取值一致，见 `cli/main.py`）
 EXIT_USAGE = 2
-
-#: `P4` 真的能跑到的最高一级（`D10` 的第三级要向量，归 `P5`）。
-P4_MAX_TIER = TIER_FULLTEXT
 
 #: 每张表最多列几行。**不是取整好看的数**：`--dry-run` 要能一眼看完，
 #: 而剩下的用一行合计交代（`…另有 N 条，合计 M 条`）——全列出来等于把报表
@@ -181,11 +179,22 @@ def index(
         min=1,
         help="一个文件最多切几片；缺省用配置里的值（改了它会让相关内容重切一遍）",
     ),
+    workers: int = typer.Option(
+        0,
+        "--workers",
+        min=0,
+        help="嵌入的并行进程数；0 = 按可用内存自动算（只对 Tier2 有意义）",
+    ),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help="清掉向量那一级的已有状态再从头建（缓存、切片的向量标签、文件状态）；换嵌入模型时用",
+    ),
     limit: int = typer.Option(DEFAULT_LIMIT, "--limit", help="每张表最多列几行（只对 --dry-run 有意义）"),
 ) -> None:
     """索引本机文档。缺省是真索引；`--dry-run` 只统计不落库。"""
     state: CliState = ctx.obj
-    _check_flags(dry_run=dry_run, resume=resume, tier=tier)
+    _check_flags(dry_run=dry_run, resume=resume, tier=tier, rebuild=rebuild)
 
     try:
         scan_config, rules, roots, ignore_file = _prepare(
@@ -224,6 +233,8 @@ def index(
         tier=tier,
         resume=resume,
         max_chunks_per_doc=max_chunks_per_doc,
+        workers=workers,
+        rebuild=rebuild,
     )
     if code:
         raise typer.Exit(code)
@@ -234,10 +245,10 @@ def index(
 # ==============================================================================
 
 
-def _check_flags(*, dry_run: bool, resume: bool, tier: int | None) -> None:
-    """三处自相矛盾的组合，当场报错。
+def _check_flags(*, dry_run: bool, resume: bool, tier: int | None, rebuild: bool) -> None:
+    """几处自相矛盾的组合，当场报错。
 
-    都在**读配置、开库、扫盘之前**判：这三种错误与磁盘状态无关，等到跑了半小时才
+    都在**读配置、开库、扫盘之前**判：这些错误与磁盘状态无关，等到跑了半小时才
     发现"这两个参数不能一起用"是最没有必要的浪费。
     """
     if dry_run and resume:
@@ -248,13 +259,13 @@ def _check_flags(*, dry_run: bool, resume: bool, tier: int | None) -> None:
         _refuse("--resume 与 --tier 0 说的是相反的两件事")
         _hint("--resume 跳过 Tier0（不扫盘），而 --tier 0 的意思是『只做 Tier0』。")
         raise typer.Exit(EXIT_USAGE)
-    if tier == TIER_SEMANTIC:
-        # 见模块文档最后一段：显式要 Tier2 与配置里写着 semantic = true 处理相反。
-        _refuse("Tier2（向量语义）还没落地，要等 P5")
-        _hint(
-            "现在最多能到 --tier 1（正文）。Tier2 缺的是嵌入那一步，"
-            "默默做到 Tier1 停下会让你以为索引跑完了。"
-        )
+    if rebuild and dry_run:
+        _refuse("--dry-run 与 --rebuild 说的是相反的两件事")
+        _hint("--dry-run 不落库，--rebuild 要清掉库里的向量状态。一起用的话其中一个会被静默忽略。")
+        raise typer.Exit(EXIT_USAGE)
+    if rebuild and resume:
+        _refuse("--resume 与 --rebuild 说的是相反的两件事")
+        _hint("--resume 接着已有的做，--rebuild 把向量那一级的已有状态全部清掉重来。")
         raise typer.Exit(EXIT_USAGE)
 
 
@@ -304,6 +315,8 @@ def _build(
     tier: int | None,
     resume: bool,
     max_chunks_per_doc: int | None,
+    workers: int,
+    rebuild: bool,
 ) -> int:
     """跑真索引，返回退出码（0 / 1 / 2）。
 
@@ -338,15 +351,6 @@ def _build(
         return EXIT_USAGE
 
     target = ceiling if tier is None else min(tier, ceiling)
-    if target > P4_MAX_TIER:
-        # 配置允许到 Tier2（模板的缺省就是这样）而 P4 只做到 Tier1。**说出来**：
-        # 不说的话用户拿到的报告看起来是"索引跑完了"，而 Tier2 是空的。
-        target = P4_MAX_TIER
-        typer.secho(
-            "配置里 semantic = true，但 Tier2（向量语义）要等 P5：这一趟做到 Tier1 为止。",
-            fg="yellow",
-            err=True,
-        )
     if tier is not None and tier > ceiling:
         # 显式要的级别被配置压住了——这是"声明了却没用"的另一种形态，必须说出来。
         typer.secho(
@@ -381,12 +385,21 @@ def _build(
                 target_tier=target,
                 resume=resume,
                 on_progress=_progress,
+                workers=workers,
+                rebuild=rebuild,
             )
     except BuildError as exc:
         # `BuildError` 是"再跑下去每一步都会是错的"（见 build.py）。已经提交的批次
         # 是完好的，所以这里不用清理任何东西——**退出去、说清楚**就够了。
         _refuse(f"索引中止：{exc}")
         log.error("索引中止：%s", exc)
+        return EXIT_USAGE
+    except EmbedUnavailable as exc:
+        # 向量那一级要的嵌入模型不在本机（没装、权重不在缓存里）。这是**用户能修的配置
+        # 问题**，不是崩溃：已经提交的 Tier0 / Tier1 是完好的，退出码 2 说清楚即可。
+        _refuse(f"语义那一级跑不了：{exc}")
+        _hint("Tier0 / Tier1 已经正常完成；装好模型后再跑一次 `lsearch index` 接着做向量。")
+        log.error("向量那一级跑不了：%s", exc)
         return EXIT_USAGE
 
     render_build(
@@ -429,7 +442,13 @@ def _progress(stats: object) -> None:
     if isinstance(stats, Tier0Stats):
         typer.echo(f"  Tier0 已写 {stats.kept:,} 条（新 {stats.new_rows:,}）")
         return
-    assert isinstance(stats, Tier1Stats)  # noqa: S101 - Progress 只有这两个实现
+    if isinstance(stats, Tier2Stats):
+        typer.echo(
+            f"  Tier2 已做 {stats.work:,} 个（切片 {stats.chunks:,} / 嵌入 {stats.embedded:,} / "
+            f"缓存 {stats.cached:,}）· 向量 {stats.ntotal_after:,} 条"
+        )
+        return
+    assert isinstance(stats, Tier1Stats)  # noqa: S101 - Progress 只有这三个实现
     typer.echo(
         f"  Tier1 已做 {stats.work:,} 个（正文 {stats.tally.fulltext:,} / "
         f"跳过 {stats.tally.skipped:,} / 失败 {stats.error:,}）· "
@@ -720,6 +739,12 @@ def render_build(
         console.print("\n[bold]Tier1（正文）[/bold]  ")
         _render_tier1(result.tier1, console)
 
+    if result.tier2 is None:
+        console.print("\n[bold]Tier2（向量语义）[/bold]  这一趟没做（没到那一级，或配置里没打开）")
+    else:
+        console.print("\n[bold]Tier2（向量语义）[/bold]  ")
+        _render_tier2(result.tier2, console)
+
     console.print(f"\n总共用时      {result.seconds:.1f} s")
     if resume and result.tier1 is not None and result.tier1.work == 0:
         # 见 index/build.py 的模块文档：空库上的 --resume 什么都不做，且**不报错**。
@@ -752,6 +777,37 @@ def _render_tier0(stats: Tier0Stats, console: Console) -> None:
     table.add_row("读不到的", f"{scan.errors_total:,} 条（样本最多 {len(scan.errors)}）")
     for path, why in scan.errors:
         table.add_row("  ", escape(f"{path}：{why}"))
+    console.print(table)
+
+
+def _render_tier2(stats: Tier2Stats, console: Console) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column()
+    table.add_row("挑出来的行", f"{stats.work:,}（这一趟要做的文件数）")
+    table.add_row("切片", f"{stats.chunks:,}（按片记，同一段文本重复会重复计）")
+    table.add_row("嵌入", f"{stats.embedded:,} 条（真正送进模型的唯一文本）")
+    table.add_row("复用", f"{stats.cached:,} 条（缓存与批内去重省下的，A9）")
+    table.add_row("标记为已索引", f"{stats.files_indexed:,}")
+    if stats.empty:
+        table.add_row("没有正文", f"{stats.empty:,}（空真：没有文本就没有向量）")
+    if stats.no_blob:
+        table.add_row("没有内容块", f"{stats.no_blob:,}（blob 缺失，不正常，单列）")
+    if stats.orphans:
+        table.add_row(
+            "孤儿向量",
+            f"{stats.orphans:,}（上次中断留下：索引里有、库里没有；无害，不影响结果）",
+        )
+    if stats.reset_files or stats.reset_chunks or stats.reset_cached:
+        table.add_row(
+            "--rebuild 清掉",
+            f"缓存 {stats.reset_cached:,} / 切片 {stats.reset_chunks:,} / 文件 {stats.reset_files:,}",
+        )
+    table.add_row("向量总数", f"{stats.ntotal_before:,} → {stats.ntotal_after:,}（本趟 +{stats.added:,}）")
+    if stats.workers:
+        table.add_row("嵌入进程", f"{stats.workers}")
+    for note in stats.worker_notes:
+        table.add_row("  ", escape(note))
     console.print(table)
 
 
