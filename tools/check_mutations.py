@@ -561,6 +561,190 @@ MUTATIONS: list[dict[str, object]] = [
                "测试不红。所以这一组钉住的是「名字那一列有正权重」，**钉不住 4.0 这个"
                "具体数**——「为什么是 4.0」至今没有护栏，记在 P4「遗留」里",
     },
+    {
+        "id": "f4-02",
+        "label": "正文这一层也加上 2-gram",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "CHUNK_BIGRAMS = False",
+        "new": "CHUNK_BIGRAMS = True",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_the_body_layer_has_no_bigrams",
+        "why": "`E38` 的读数：2-gram 让正文的 token 涨到 2.76×，而收益**没实测过**"
+               "（量的是文件名碎片，正文检索打的是词）。两层切法**故意不一样**，而"
+               "「顺手统一成一份实现」是最自然的重构——落盘量翻倍、一个字都不报错。"
+               "⚠ 判据不能写成「token 串里含不含 `度报`」：`cut_for_search` 会把整词 "
+               "`年度报告` 也吐出来，那两个字的**子串**本来就在里面（第一版就是这么写"
+               "的，它让变体假绿）。只有「搜 `度报` 有没有落点」才是那条分界",
+    },
+    {
+        "id": "f4-02",
+        "label": "`parser_ver` 变了也当复用",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        if row[1] == parser_ver:",
+        "new": "        if True:",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_a_new_parser_version_replaces_the_old_chunks",
+        "why": "计划 §4.4.1 那条「缓存键必须带版本」的落点。少了它，换了提取器之后"
+               "**旧切片永远留着、新格式的正文永远进不了库**——而库里看上去一切正常"
+               "（有 blob、有切片、有 FTS 行），只是那些文件的内容搜不到",
+    },
+    {
+        "id": "f4-02",
+        "label": "换版本时不删旧切片",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        self._delete_chunks(blob_id)",
+        "new": "        None",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_a_new_parser_version_replaces_the_old_chunks",
+        "why": "与上一条是两个不同的坏法：那一条是「压根没认出版本变了」，这一条是"
+               "「认出来了但没收拾旧的」。后者更坏——`chunk_count` 被清成 0 而 `chunks` "
+               "里躺着旧行，于是「这一份内容有几片」与「库里实际有几片」从此对不上",
+    },
+    {
+        "id": "f4-02",
+        "label": "删切片时不删 `chunks_fts` 那些行",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '"DELETE FROM chunks_fts WHERE rowid IN"',
+        "new": '"SELECT 1 FROM chunks_fts WHERE rowid IN"',
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_replacing_leaves_no_orphan_fts_row",
+        "why": "FTS5 是**独立表**，`chunks` 上的 `ON DELETE CASCADE` 管不着它。孤儿行的"
+               "症状是「搜到一条、显示不出来」——`search_chunks` 的 JOIN 挂不上，"
+               "而那看起来只是「某几个结果点不开」",
+    },
+    {
+        "id": "f4-02",
+        "label": "同一个 blob 允许写两遍切片",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        if existing:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_writing_chunks_twice_is_refused",
+        "why": "续跑（`F4-04`）与「一轮里第二个路径碰到同一份内容」都会让人以为该再写"
+               "一遍。两份一样的文本进库不报错，只在结果列表里表现为重复条目——"
+               "而 `chunk_count` 也是个偏大的数",
+    },
+    {
+        "id": "f4-02",
+        "label": "`chunks_fts` 的 rowid 不再等于 `chunks.id`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "                    chunk_id,\n                    tokenize(chunk.text, bigrams=CHUNK_BIGRAMS),",
+        "new": "                    999,\n                    tokenize(chunk.text, bigrams=CHUNK_BIGRAMS),",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_the_fts_rowid_is_the_chunk_id",
+        "why": "这个 id 是**三条路径共用的**：`search_chunks` 的 JOIN、`_delete_chunks` "
+               "的删除条件、`chunk_id` 那一列。`chunk_id` 在 `schema.sql` 里是 "
+               "`UNINDEXED`，所以拿它代替 rowid 等于每次删除全扫一遍 FTS 表；而不一致"
+               "本身就是「搜得到、取不回」",
+    },
+    {
+        "id": "f4-02",
+        "label": "`chunks.text` 存的是分词后的文本",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "                    chunk.text,\n                    chunk.n_tokens,",
+        "new": "                    tokenize(chunk.text, bigrams=CHUNK_BIGRAMS),\n                    chunk.n_tokens,",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_the_stored_text_is_the_original_not_the_tokenized_form",
+        "why": "计划 §4.4.1 把「展示片段一律从 `chunks.text` 取回原文」写成了义务。存成"
+               "分词形态不报错，只是每个结果都变成小写、词间带空格的串——而"
+               "`char_start` / `char_end` 从此指不进 `chunks.text`，高亮全废",
+    },
+    {
+        "id": "f4-02",
+        "label": "`blobs.chunk_count` 不再更新",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '"UPDATE blobs SET chunk_count = ? WHERE id = ?", (written, blob_id)',
+        "new": '"UPDATE blobs SET chunk_count = ? WHERE id = ?", (0, blob_id)',
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_chunk_count_is_updated_on_the_blob",
+        "why": "这一列是「这份内容切出几片」的**唯一**记录，`replaced` 那条路还要靠它"
+               "清账。它偏小时的分级就绪判断（`F4-03`）会以为 Tier1 没跑过",
+    },
+    {
+        "id": "f4-02",
+        "label": "标题不再分词（原样进 FTS 列）",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": 'title_tok = tokenize(title or "", bigrams=CHUNK_BIGRAMS)',
+        "new": 'title_tok = title or ""',
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_the_title_is_tokenized_too",
+        "why": "`chunks_fts.title` 是要被 MATCH 的列，走的必须是同一套切法。原样进去"
+               "之后中文标题**一个词也搜不到**（`unicode61` 把整串汉字当一个 token，"
+               "而查询侧给的是切开的词）——`SELECT` 出来看还挺正常",
+    },
+    {
+        "id": "f4-02",
+        "label": "`error` 不再要求带原因",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        if status == _STATUS_WITH_ERROR and msg is None:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_an_error_outcome_needs_a_reason",
+        "why": "`A6` 的后半句是「原因写入 `files.error_msg`」，而 `error_msg` 非空是全库"
+               "**唯一**的失败判据。一个没有原因的失败是最难查的记录——每一层都觉得"
+               "自己没错，失败报表里只剩下一堆文件路径",
+    },
+    {
+        "id": "f4-02",
+        "label": "`error_msg` 不再归一成 `NULL`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": 'msg = (error_msg or "").strip() or None',
+        "new": "msg = error_msg",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_an_empty_error_message_becomes_null",
+        "why": "`extract/batch.py` 的 `Outcome.error_msg` 给的是**空串**、库里要的是 "
+               "`NULL`。两处形态不同的话，「这一格是不是空的」要写两种判断，而漏掉的"
+               "那一种会让 `skipped` 的文件在 `WHERE error_msg IS NOT NULL` 里冒出来——"
+               "失败报表被噪音淹掉",
+    },
+    {
+        "id": "f4-02",
+        "label": "结局写到不存在的路径上也算成功",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        return cur.rowcount > 0",
+        "new": "        return True",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_an_unknown_path_returns_false_and_writes_nothing",
+        "why": "全盘一轮里「结局落到空处」意味着 `files` 的路径与提取那一侧对不上"
+               "（归一化漏了一处、大小写、外接盘掉了）。计数对不上是唯一的线索，"
+               "返回常量 `True` 把这条线索也堵死",
+    },
+    {
+        "id": "f4-02",
+        "label": "达成的 tier 不落库（一律 0）",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "                status,\n                tier,",
+        "new": "                status,\n                0,",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_a_fulltext_outcome_links_the_blob_and_lifts_the_tier",
+        "why": "`tier` 记的是**达成的最高级**（`D10`），`F4-03` 的选择条件与「语义未就绪」"
+               "的显式标注都读它。全落 0 之后那一趟会把全盘重做一遍，而分级就绪永远"
+               "停在 Tier0——两件事都不报错",
+    },
+    {
+        "id": "f4-02",
+        "label": "正文检索忽略 `limit`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "            (expr, limit),",
+        "new": "            (expr, 20),",
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_limit_is_honoured",
+        "why": "⚠ 这里的 `limit` 默认就是 20，所以这一条变体只钉得住「调用方给的 `limit` "
+               "被用上了」——钉不住默认值本身（那要看 `F4-04` 的 CLI 面）。"
+               "正文一片 512 token，一页几十条就是几 MB 的结果",
+    },
+    {
+        "id": "f4-02",
+        "label": "`paths_for_blob` 不再排序",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '"SELECT path FROM files WHERE blob_id = ? ORDER BY path", (blob_id,)',
+        "new": '"SELECT path FROM files WHERE blob_id = ? ORDER BY path DESC", (blob_id,)',
+        "tests": ["tests/unit/test_store_body_fts.py"],
+        "expect": "test_paths_for_blob_is_sorted",
+        "why": "一份内容对应好几个路径时，去重（`D12`）在结果面上的样子就是这一串。"
+               "顺序不定的话同一个查询两次跑出不同的输出——而「哪些文件里有这份内容」"
+               "的答案会随扫描顺序漂移（`F6` 的 `--prune` 也会跟着不稳）",
+    },
 ]
 
 

@@ -1,6 +1,7 @@
-r"""索引库的读写面（P4 / `F4-01`）。测试落点 `tests/unit/test_store_files_fts.py`。
+r"""索引库的读写面（P4 / `F4-01` 与 `F4-02`）。测试落点 `tests/unit/test_store_files_fts.py`
+（Tier0 那一层）与 `tests/unit/test_store_body_fts.py`（正文那一层）。
 
-三句话概括这一层：
+四句话概括这一层：
 
 1. **建库/开库都走 `SqliteStore.open()`**，它会配 PRAGMA、按 `schema.sql` 建表、
    核对 `user_version`。调用方不需要知道建表语句长什么样。
@@ -8,20 +9,49 @@ r"""索引库的读写面（P4 / `F4-01`）。测试落点 `tests/unit/test_stor
    两处刻意的差异写在那个文件的注释里）。本文件里**不抄任何 DDL**。
 3. **切法只有一处真相来源**：`tokens.py`。本文件只决定"哪张表要不要 2-gram"，
    而那个决定是一个带读数的常量（见 `FILES_BIGRAMS` / `CHUNK_BIGRAMS`）。
+4. **一次写入不提交**（`put_file()` / `put_blob()` / `put_chunks()` /
+   `set_file_extracted()`）。事务边界属于管线，见下面那一段。
 
 ------------------------------------------------------------------------------
-`put_file()` **不提交**——提交是调用方的事
+写入**不提交**——提交是调用方的事
 ------------------------------------------------------------------------------
 
 `F4-04` 要求"可中断续跑"，所以提交的粒度属于**管线**（`build.py` 每
-`PerfCfg.commit_every_files` 个文件提交一次），不属于单行写入。`put_file()` 因此只在
-当前事务里落两行（`files` + `files_fts`）就返回：
+`PerfCfg.commit_every_files` 个文件提交一次），不属于单行写入。所以：
 
 * 想让写入生效，调用方得自己 `commit()`；
-* 想在同一个事务里攒一批，连着调它就是——Python 的 `sqlite3` 默认在第一条 DML 上
-  开事务、`commit()` 才结束，所以两次 `put_file()` 之间不提交就是同一个事务；
+* 想在同一个事务里攒一批，连着调几个 `put_*` 就是——Python 的 `sqlite3` 默认在第一条
+  DML 上开事务、`commit()` 才结束，所以两次写入之间不提交就是同一个事务；
 * `close()` **会**兜底提交（见它的文档串），但不要依赖它：那只是防"最后一个批次
   悄悄丢了"。
+
+⚠ 这一条也是**崩溃后不留半截状态**的全部依据：一个文件的三处写入（`files` 那一行的
+更新、`blobs`、`chunks` + `chunks_fts`）落在同一个事务里，崩在中间就是一起回滚，
+续跑时会重新做一遍。
+
+------------------------------------------------------------------------------
+正文那一层（`F4-02`）：blob 按内容去重，切片挂在 blob 上
+------------------------------------------------------------------------------
+
+`put_blob()` / `put_chunks()` 是 `D12` 的落点：**一份内容只提取、分块、嵌入一次**，
+多个路径共用同一行 `blobs`，切片挂在 blob 上而不是文件上（`chunks.blob_id`）。
+`files.blob_id` 指回它，于是"同一份内容出现在几个路径上"在库里是**看得到**的
+（`paths_for_blob()`）——同一个 blob 命中一次正文，就能说出它全部的路径。
+
+`put_blob()` 的三种结局调用方要能分辨（`BlobWrite.action`），尤其是 `replaced`：
+内容一样但 `parser_ver` 变了，意味着**旧解析结果必须被丢掉**。计划 §4.4.1 那条
+"缓存键必须带上版本"说的就是它，而静默复用旧切片的症状是"改过提取器之后，某些文件的
+正文永远搜不到"——不报错，只是少。
+
+**引用计数不存列**：`blobs` 上没有 `refcount`，"一个 blob 被几条 `files` 指着"由
+`SELECT count(*) FROM files WHERE blob_id = ?` 现算（计划 §4.4.1 的原话，`idx_files_blob`
+就是为它建的索引）。理由与 `ingest/dedup.py` 里那三条"会静默出错的格子"同源：**一个
+只会涨的计数器比没有计数器更坏**——它不报错，只会让内容永远清不掉。现算的代价是一次
+索引查找，而它没有第二条真相。
+
+⚠ `ingest/dedup.py` 的模块文档里曾有一句"计划 §4.3 的 `blobs` 表要存 `refcount`"，
+那是 `F2-04` 落地时照着计划 §4.3 写的，而 §4.4 与 `schema.sql` 用的都是现算——
+`F4-02` 把那句话改正了（同一件事不能有两处真相）。
 
 ------------------------------------------------------------------------------
 `files.path` 的形态由本模块定，且只有一个函数说了算
@@ -35,21 +65,29 @@ r"""索引库的读写面（P4 / `F4-01`）。测试落点 `tests/unit/test_stor
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 
+from localsearch.core.models import Chunk
 from localsearch.index.tokens import and_expr, query_tokens, tokenize
 from localsearch.ingest.base import drive_of
 
 __all__ = [
+    "BLOB_CREATED",
+    "BLOB_REPLACED",
+    "BLOB_REUSED",
     "CHUNK_BIGRAMS",
     "FILES_BIGRAMS",
     "NAME_WEIGHT",
     "PATH_WEIGHT",
     "SCHEMA_VERSION",
     "STATUSES",
+    "BlobWrite",
+    "ChunkHit",
+    "ChunkSearch",
     "FileRow",
     "PathHit",
     "PathSearch",
@@ -98,6 +136,22 @@ STATUSES = frozenset(
 #: `D10` 的三级。`files.tier` 只会是这三个值。
 MAX_TIER = 2
 
+#: `put_blob()` 的三种结局（`BlobWrite.action`）。
+#:
+#: `replaced` 必须能被调用方看见：它是"**这一份内容的旧解析结果已经被丢掉**"，
+#: 在一轮全盘索引里应该是个位数（除非刚换过提取器），而它悄悄发生就等于旧切片
+#: 在没人知道的情况下消失了。
+BLOB_CREATED = "created"
+BLOB_REUSED = "reused"
+BLOB_REPLACED = "replaced"
+
+_BLOB_ACTIONS = frozenset({BLOB_CREATED, BLOB_REUSED, BLOB_REPLACED})
+
+#: `files.status` 里**唯一**允许（并且必须）带 `error_msg` 的那个。`skipped`
+#: （这一类 v1 不做）故意不算：全盘上 `.db` / `.dat` / `.exe` 多得是，把"这一类不做"
+#: 也填上原因，失败报表就淹了（`extract/batch.py` 的模块文档定了这条分工）。
+_STATUS_WITH_ERROR = "error"
+
 
 class StoreError(Exception):
     """索引库这一层能说清楚的失败。"""
@@ -105,6 +159,16 @@ class StoreError(Exception):
 
 class SchemaVersionError(StoreError):
     """库里的 `user_version` 与 `SCHEMA_VERSION` 对不上。"""
+
+
+def _now(now: int | None) -> int:
+    """这一笔写入的时刻（Unix 秒）。`now` 传了就照用它。
+
+    让它成为一个**参数**而不是直接调 `time.time()`，是为了测试能钉住写入的
+    `created_at` / `indexed_at`——"这一列有没有被写上"与"写的是不是现在"
+    是两件事，前者是这一层该保证的，后者是机器时钟的事。
+    """
+    return int(time.time()) if now is None else int(now)
 
 
 def store_path(path: str | Path) -> str:
@@ -205,6 +269,83 @@ class PathSearch:
     tokens: tuple[str, ...]
     expr: str | None
     hits: tuple[PathHit, ...]
+
+    @property
+    def has_query(self) -> bool:
+        """查询串里有没有可搜的 token。没有就**根本没查**，`hits` 必然是空的。"""
+        return self.expr is not None
+
+
+@dataclass(frozen=True, slots=True)
+class BlobWrite:
+    """`put_blob()` 的结果：这份内容落在哪一行，以及**这一趟要不要接着写切片**。
+
+    `needs_chunks` 是调用方真正要问的问题，把它做成属性而不是让调用方去比字符串：
+    `created` 与 `replaced` 都要写，只有 `reused` 不要——**"不要"这一格是全部**
+    （复用时再写一遍切片，会在同一个 blob 下留两份一样的文本，搜出来是重复的，
+    而 `put_chunks()` 会当场拦下来，见那里）。
+    """
+
+    blob_id: int
+    action: str
+
+    def __post_init__(self) -> None:
+        if self.action not in _BLOB_ACTIONS:
+            raise ValueError(
+                f"action 只能是 {sorted(_BLOB_ACTIONS)} 之一，收到 {self.action!r}"
+            )
+
+    @property
+    def needs_chunks(self) -> bool:
+        """这一趟要不要调 `put_chunks()`。"""
+        return self.action != BLOB_REUSED
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkHit:
+    """`search_chunks()` 的一条命中。`rank` 是 bm25 的原始值（**越小越相关**）。
+
+    `text` 是**原文**（`chunks.text`），不是 FTS 里那份分词后的文本——计划 §4.4.1
+    把这条写成了义务："展示片段一律从 `chunks.text` 按 `chunk_id` 取回原文"。
+    分词那份（`chunks_fts.text_tok`）只用来匹配，它是小写的、词之间带空格的。
+
+    ⚠ **没有 `title`**：`title` 只存在于 `chunks_fts` 里（`chunks` 表没有这一列），
+    而那一份是**分词后**的形态，拿去显示会是"年度报告 2024"这种小写、带空格的串。
+    要显示文档标题得给它另找一个落点（见 P4「遗留」）。命中里能显示的是 `text`
+    与路径（`paths_for_blob()`）。
+
+    `blob_id` 是这一片挂在**哪份内容**上：同一份内容的多个路径共用它，所以
+    "这个命中对应哪些文件"要问 `paths_for_blob()`。
+    """
+
+    chunk_id: int
+    blob_id: int
+    ord: int
+    text: str
+    char_start: int | None
+    char_end: int | None
+    n_tokens: int | None
+    rank: float
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkSearch:
+    """`search_chunks()` 的完整结果。**与 `PathSearch` 同形**，理由也一样：
+
+    "查询串里没有可搜内容"（用户敲了一串标点）与"搜到了 0 条"是两件事，
+    前者的正确输出是"这个词没有可搜的内容"。只回一个 `[]` 的话调用方分不出。
+
+    ⚠ 还多一件事：**库里根本没有正文**（Tier1 没跑完）时，`has_query` 为真而
+    `hits` 为空——那与"跑完了但没搜到"在数据上**无法区分**。分级就绪的标注
+    （`D10`：`A8` 要的"显式标注语义未就绪"）不能靠这个结果对象自己说，得由
+    调用方拿着 `count_files(tier=…)` 一类的账来判断（`F4-03` 的 tier 状态推进
+    给的就是那本账）。
+    """
+
+    query: str
+    tokens: tuple[str, ...]
+    expr: str | None
+    hits: tuple[ChunkHit, ...]
 
     @property
     def has_query(self) -> bool:
@@ -468,6 +609,294 @@ class SqliteStore:
                 for row in rows
             ),
         )
+
+    # ------------------------------------------------------------------ 正文
+    #
+    # 一个文件走完 Tier1 的样子（写顺序就是这个顺序，都在同一个事务里）：
+    #
+    #   1. put_blob()           → 这份内容落在哪一行、要不要接着写
+    #   2. put_chunks()         → 只有 needs_chunks 为真时才调
+    #   3. set_file_extracted() → 把结局写回 files（status / tier / blob_id / error_msg）
+    #
+    # 失败的那两条路（这一类不做 / 这个文件坏了）**没有第 1、2 步**：没有正文就没有
+    # 内容可挂，`blob_id` 留 NULL 是对的。第 3 步两种都要走——`skipped` 与 `error`
+    # 各自是一个终态，不写回的话下一趟还会再挑一次。
+
+    def put_blob(
+        self,
+        *,
+        content_hash: str,
+        size_bytes: int,
+        extractor: str,
+        parser_ver: str,
+        now: int | None = None,
+    ) -> BlobWrite:
+        """把"这份内容"登记进 `blobs`，按内容哈希去重（`D12`）。**不提交**。
+
+        三种结局（`BlobWrite.action`）：
+
+        * `created`——库里没有这份内容，插一行；
+        * `reused`——有，且 `parser_ver` **一样**：一个字节都不动。同一份内容在一轮里
+          被第二个路径碰到、或第二天重扫碰到，走的都是这一格；
+        * `replaced`——有，但 `parser_ver` **不一样**：**旧切片与旧的 FTS 行先删掉**，
+          再把这一行改成新的提取器与版本。这是计划 §4.4.1 那条"缓存键必须带上版本"
+          的落点：换了提取器之后，旧的切片**必须**被丢掉，否则它会永远躺在库里——
+          不报错，只是搜不到新格式里的内容。
+
+        ⚠ `parser_ver` **没有默认值**，这是刻意的：它的取值必须同时覆盖"提取器实现"
+        与"分块参数"（计划 §4.4），而这两样分头变化时都得触发一次重切。给它一个
+        默认值（比如 `__version__`）就等于让它默认做错——包版本号与提取逻辑的改动
+        完全无关。取值由谁组装写在 `F4-04` 那一层。
+
+        ⚠ `replaced` 这条路径**在 `P5` 落地向量之后还要多做一件事**：旧切片的
+        `vec_label` 要标成 tombstone，否则 HNSW 里会留着指向已经不存在的内容的向量。
+        `P4` 安全只因为那时还没有向量（`chunks.vec_label` 一律 NULL）——见 P4「遗留」。
+        """
+        if not content_hash:
+            raise ValueError("content_hash 不能为空——blobs 是按内容去重的")
+        if not parser_ver:
+            raise ValueError("parser_ver 不能为空——空值会让'版本变了'这件事无法察觉")
+        row = self._conn.execute(
+            "SELECT id, parser_ver FROM blobs WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        if row is None:
+            cur = self._conn.execute(
+                "INSERT INTO blobs"
+                " (content_hash, size_bytes, extractor, parser_ver, chunk_count, created_at)"
+                " VALUES (?, ?, ?, ?, 0, ?)",
+                (content_hash, size_bytes, extractor, parser_ver, _now(now)),
+            )
+            return BlobWrite(int(cur.lastrowid), BLOB_CREATED)
+        blob_id = int(row[0])
+        if row[1] == parser_ver:
+            return BlobWrite(blob_id, BLOB_REUSED)
+        self._delete_chunks(blob_id)
+        # created_at **不动**：这一行的身份（"这份内容第一次见到是什么时候"）没变，
+        # 变的是"它按哪个版本的解析器切过"。后者问 files.indexed_at。
+        self._conn.execute(
+            "UPDATE blobs SET size_bytes = ?, extractor = ?, parser_ver = ?,"
+            " chunk_count = 0 WHERE id = ?",
+            (size_bytes, extractor, parser_ver, blob_id),
+        )
+        return BlobWrite(blob_id, BLOB_REPLACED)
+
+    def put_chunks(
+        self,
+        blob_id: int,
+        chunks: Sequence[Chunk],
+        *,
+        title: str | None = None,
+        modality: str = "text",
+    ) -> int:
+        r"""把切片写进 `chunks` + `chunks_fts`，并更新 `blobs.chunk_count`。**不提交**。
+
+        返回写进去的片数（**空正文就是 0**——那是合法的：一个 0 字节文件有 blob、
+        没有切片）。
+
+        **只应在 `BlobWrite.needs_chunks` 为真时调用。** 重复调用会当场抛
+        `StoreError`，而不是在同一个 blob 下留两份一样的文本——后者搜出来是重复的，
+        不报错，只在有人盯着结果列表时才看得出来。
+
+        `chunks_fts` 的那一行**用 `chunks.id` 当 `rowid`**（同时填 `chunk_id` 那一列，
+        与 `schema.sql` 一致）。这样删除一片是 `WHERE rowid = ?` 一次索引查找，而
+        `chunk_id` 是 `UNINDEXED` 的——拿它当删除条件等于每次全扫一遍 FTS 表。
+        两条路径都指向同一个 id，`search_chunks()` 的 JOIN 也按 `rowid`。
+
+        `title` 存的是**分词后**的形态（`chunks_fts.title` 是要被 MATCH 的列）。
+        它因此不能拿去显示——`ChunkHit` 里没有 title 就是这个原因。
+        """
+        existing = self._conn.execute(
+            "SELECT count(*) FROM chunks WHERE blob_id = ?", (blob_id,)
+        ).fetchone()[0]
+        if existing:
+            raise StoreError(
+                f"blob {blob_id} 已经有 {existing} 片切片了——put_chunks() 只应在"
+                f" put_blob().needs_chunks 为真时调用；重复写会在库里留下两份一样的文本"
+            )
+        title_tok = tokenize(title or "", bigrams=CHUNK_BIGRAMS)
+        written = 0
+        for chunk in chunks:
+            cur = self._conn.execute(
+                "INSERT INTO chunks"
+                " (blob_id, ord, char_start, char_end, text, n_tokens, modality)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    blob_id,
+                    chunk.ord,
+                    chunk.char_start,
+                    chunk.char_end,
+                    chunk.text,
+                    chunk.n_tokens,
+                    modality,
+                ),
+            )
+            chunk_id = int(cur.lastrowid)
+            self._conn.execute(
+                "INSERT INTO chunks_fts (rowid, text_tok, title, chunk_id)"
+                " VALUES (?, ?, ?, ?)",
+                (
+                    chunk_id,
+                    tokenize(chunk.text, bigrams=CHUNK_BIGRAMS),
+                    title_tok,
+                    chunk_id,
+                ),
+            )
+            written += 1
+        # 无条件更新（写 0 片也要落）：`replaced` 那条路刚把 chunk_count 清成 0，
+        # 而"这一份内容切出 0 片"本身是事实，不该留着一个旧数字。
+        self._conn.execute(
+            "UPDATE blobs SET chunk_count = ? WHERE id = ?", (written, blob_id)
+        )
+        return written
+
+    def set_file_extracted(
+        self,
+        path: str,
+        *,
+        status: str,
+        tier: int,
+        content_hash: str | None = None,
+        blob_id: int | None = None,
+        error_msg: str | None = None,
+        indexed_at: int | None = None,
+        now: int | None = None,
+    ) -> bool:
+        r"""把一个文件的提取结局写回它那一行。**不提交**。返回有没有这一行。
+
+        这是 `A6` 后半句（"原因写入 `files.error_msg`"）的**唯一**落点，也是 Tier1
+        那一趟唯一改动已有行的入口——`put_file()` 只插入、不更新（`F4-01` 刻意如此：
+        Tier0 那一趟反复跑不该把好行改成坏的）。
+
+        三道校验，都是"写错了不报错、只在很久以后表现为查不出来"的那一类：
+
+        * `status` 必须在 `STATUSES` 里。写错一个字母不会报错，只会让 Tier1 的选择
+          条件再也挑不到这个文件。
+        * `tier` 必须在 `0..MAX_TIER`。⚠ `tier` 记的是**达成的最高级**，不是"跑到哪
+          一步"：`fulltext` → `1`，而 `skipped` / `error` 是 `0`（这一类文件本来就
+          没做，把它记成 1 等于说它进过正文索引）。"该不该再做"由 `status` 说
+          （`F4-03` 的选择条件同时看这两列）。
+        * `error_msg` 与 `status` 的对应：`error` **必须**带原因（一个没有原因的失败
+          是最难查的记录——每一层都觉得自己没错，`extract/batch.py` 的 `Outcome`
+          在那一头把关），其余 status **必须不带**（`error_msg` 非空是全库唯一的
+          "失败"判据）。空串一律归一成 `NULL`——`batch.Outcome.error_msg` 给的就是
+          空串，两边形态不同会让"这一格是不是空的"要写两种判断。
+
+        `indexed_at` 不传就取当前时间：这个方法只在"这一个文件刚被处理过"时调用，
+        让调用方每次都自己取时间是白给的一处不一致。
+        """
+        if status not in STATUSES:
+            raise ValueError(f"status 只能是 {sorted(STATUSES)} 之一，收到 {status!r}")
+        if not 0 <= tier <= MAX_TIER:
+            raise ValueError(f"tier 只能是 0..{MAX_TIER}，收到 {tier}")
+        msg = (error_msg or "").strip() or None
+        if status == _STATUS_WITH_ERROR and msg is None:
+            raise ValueError(f"status={status!r} 必须带 error_msg（没有原因的失败查不出来）")
+        if status != _STATUS_WITH_ERROR and msg is not None:
+            raise ValueError(
+                f"status={status!r} 不该带 error_msg（非空的 error_msg 是全库唯一的"
+                f"失败判据）：{msg!r}"
+            )
+        cur = self._conn.execute(
+            "UPDATE files SET status = ?, tier = ?, content_hash = ?, blob_id = ?,"
+            " error_msg = ?, indexed_at = ? WHERE path = ?",
+            (
+                status,
+                tier,
+                content_hash,
+                blob_id,
+                msg,
+                _now(now) if indexed_at is None else int(indexed_at),
+                store_path(path),
+            ),
+        )
+        return cur.rowcount > 0
+
+    def paths_for_blob(self, blob_id: int) -> tuple[str, ...]:
+        """这份内容（blob）被哪些路径指着，按路径排序。
+
+        去重（`D12`）在结果面上就是这一句话：**同一份内容命中一次，但它可能对应
+        好几个文件**。少了这一步，用户会以为"只搜到一个文件"，而那些副本在库里
+        是明确记着的。
+        """
+        return tuple(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT path FROM files WHERE blob_id = ? ORDER BY path", (blob_id,)
+            )
+        )
+
+    def count_chunks(self, *, blob_id: int | None = None) -> int:
+        """切片总数，或某个 blob 的片数。报表与测试用。"""
+        if blob_id is None:
+            return int(self._conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+        return int(
+            self._conn.execute(
+                "SELECT count(*) FROM chunks WHERE blob_id = ?", (blob_id,)
+            ).fetchone()[0]
+        )
+
+    def search_chunks(self, query: str, *, limit: int = 20) -> ChunkSearch:
+        """按正文检索（Tier1）。切法与查询侧的处理**与 Tier0 同一套**（`tokens.py`）。
+
+        ⚠ 只对**已经做过 Tier1**的文件有结果。库里一篇正文都没有时它返回空列表，
+        而那与"跑完了、但这个词没出现"长得一模一样——分级就绪的标注（`D10`）因此
+        不能由这个方法自己给，得看 tier 那本账（`ChunkSearch` 的类文档里写了）。
+
+        **不做列加权**（`bm25(chunks_fts)` 用默认的 1.0）：`files_fts` 那两列敢加权
+        是因为"名字优先于它所在的目录"是常识级的不变量，而"命中标题该不该排在命中
+        正文前面"**没测过**——给它一个拍出来的权重，就是给排序加一个说不清的东西。
+        要加权得先有 `A4` 那 20 条评测。
+        """
+        raw = query or ""
+        tokens = tuple(query_tokens(raw))
+        expr = and_expr(tokens)
+        if expr is None:
+            return ChunkSearch(query=raw, tokens=tokens, expr=None, hits=())
+        rows = self._conn.execute(
+            "SELECT c.id, c.blob_id, c.ord, c.text, c.char_start, c.char_end,"
+            " c.n_tokens, bm25(chunks_fts) AS rank"
+            " FROM chunks_fts JOIN chunks AS c ON c.id = chunks_fts.rowid"
+            " WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+            (expr, limit),
+        ).fetchall()
+        return ChunkSearch(
+            query=raw,
+            tokens=tokens,
+            expr=expr,
+            hits=tuple(
+                ChunkHit(
+                    chunk_id=row[0],
+                    blob_id=row[1],
+                    ord=row[2],
+                    text=row[3],
+                    char_start=row[4],
+                    char_end=row[5],
+                    n_tokens=row[6],
+                    rank=row[7],
+                )
+                for row in rows
+            ),
+        )
+
+    def _delete_chunks(self, blob_id: int) -> int:
+        r"""删掉一个 blob 的全部切片与它们在 `chunks_fts` 里的行。返回删了几片。
+
+        **两处都要删，而且要按这个顺序**：先按 `rowid` 删 FTS（`chunks_fts` 是独立的
+        虚拟表，`chunks` 上的 `ON DELETE CASCADE` 管不着它），再删 `chunks`。
+        反过来做的话，`chunks` 的 id 已经没了，FTS 那批行就成了孤儿——它们搜得出来，
+        而 JOIN 不到任何切片，于是"搜到一条、显示不出来"。
+
+        ⚠ 这是当前唯一会删 FTS 行的地方。`files_fts` 那边（`files` 的增删）还没有
+        对应的清理路径，归 `F6` 的 `--prune`（P4「遗留」）。
+        """
+        cur = self._conn.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN"
+            " (SELECT id FROM chunks WHERE blob_id = ?)",
+            (blob_id,),
+        )
+        deleted = cur.rowcount
+        self._conn.execute("DELETE FROM chunks WHERE blob_id = ?", (blob_id,))
+        return int(deleted)
 
     # ------------------------------------------------------------------ 杂项
 
