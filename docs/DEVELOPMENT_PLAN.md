@@ -560,7 +560,9 @@ language            = "zh"              # 帮助与提示语言
 interactive_default = true              # 无参数运行 lsearch 时进入交互模式（D7）
 
 [perf]
-workers = 8                             # 并行嵌入进程数，默认 min(8, cores//2)
+workers = 0                             # F5-02 改：0 = 自动，按内存算（见 §3.2 第 2 条）；
+                                        # 正数是上限，超出预算时被夹住并记一条 note。
+                                        # 原写的 min(8, cores//2) = 8 是拍的，从未被内存检验过
 commit_every_files = 500                # 每 N 个文件提交一次事务
 ```
 
