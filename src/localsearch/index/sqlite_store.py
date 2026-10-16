@@ -11,6 +11,10 @@ r"""索引库的读写面（P4 / `F4-01` 与 `F4-02`）。测试落点 `tests/un
    而那个决定是一个带读数的常量（见 `FILES_BIGRAMS` / `CHUNK_BIGRAMS`）。
 4. **一次写入不提交**（`put_file()` / `put_blob()` / `put_chunks()` /
    `set_file_extracted()`）。事务边界属于管线，见下面那一段。
+5. **`status` 与 `tier` 的词义不在这里**（`F4-03`）：取值域、哪一趟挑哪些行、
+   "就绪"怎么算，全在 `index/tier.py`。本模块从那里导入词表，只负责**执行**
+   （`set_file_extracted()` 的校验、`iter_tier_work()` 的选择条件、`tier_counts()`
+   的盘点）。见下面「状态机在 `tier.py`」那一段。
 
 ------------------------------------------------------------------------------
 写入**不提交**——提交是调用方的事
@@ -54,6 +58,27 @@ r"""索引库的读写面（P4 / `F4-01` 与 `F4-02`）。测试落点 `tests/un
 `F4-02` 把那句话改正了（同一件事不能有两处真相）。
 
 ------------------------------------------------------------------------------
+状态机在 `tier.py`，本模块只执行它
+------------------------------------------------------------------------------
+
+`F4-01` / `F4-02` 那两轮里，`STATUSES` 与 `MAX_TIER` 一度定义在本文件——那时它们只是
+`set_file_extracted()` 的入参校验。`F4-03` 把它们搬去 `index/tier.py`，因为同一个词表
+同时要说四件事：取值域、**哪一趟会挑到哪一行**（`work_condition()`）、**"就绪"怎么算**
+（`TierLedger`）、以及 `status` 与 `tier` 之间的那条单向约束。四件事分在两地，症状是
+"校验通过、但那一趟永远挑不到它"——不报错，只是那一级永远不就绪。
+
+本模块因此多了三个方法，它们都只是**一条 SQL + 一次委托**：
+
+* `tier_counts()`——`GROUP BY status, tier` 点一次数，喂给 `ledger_from()` 算台账；
+* `iter_tier_work(tier)`——按 `work_condition()` 挑出这一趟要处理的文件行；
+* `set_file_extracted()` 里那条新的校验——`status` 声明的级别不许超过 `tier` 记的
+  （`STATUS_MIN_TIER` / `STATUS_MAX_TIER`）。
+
+⚠ `STATUSES` / `MAX_TIER` 仍然是 `sqlite_store` 命名空间里的名字（导入进来的），
+但它们**不在它的 `__all__` 里**：让它们从这一层的公开面上消失，是为了不在下一个
+功能点里被"顺手"重新定义一遍。
+
+------------------------------------------------------------------------------
 `files.path` 的形态由本模块定，且只有一个函数说了算
 ------------------------------------------------------------------------------
 
@@ -72,6 +97,13 @@ from importlib.resources import files
 from pathlib import Path
 
 from localsearch.core.models import Chunk
+from localsearch.index.tier import (
+    MAX_TIER,
+    STATUS_MAX_TIER,
+    STATUS_MIN_TIER,
+    STATUSES,
+    work_condition,
+)
 from localsearch.index.tokens import and_expr, query_tokens, tokenize
 from localsearch.ingest.base import drive_of
 
@@ -84,7 +116,6 @@ __all__ = [
     "NAME_WEIGHT",
     "PATH_WEIGHT",
     "SCHEMA_VERSION",
-    "STATUSES",
     "BlobWrite",
     "ChunkHit",
     "ChunkSearch",
@@ -127,14 +158,11 @@ CHUNK_BIGRAMS = False
 NAME_WEIGHT = 4.0
 PATH_WEIGHT = 1.0
 
-#: `files.status` 的取值（`schema.sql` 那行注释是全集）。**写错一个字母不会报错**，
-#: 只会让 Tier1 的选择条件永远挑不到那个文件，所以这里挡一道。
-STATUSES = frozenset(
-    {"pending", "metadata", "fulltext", "indexed", "skipped", "error", "stale"}
-)
-
-#: `D10` 的三级。`files.tier` 只会是这三个值。
-MAX_TIER = 2
+#: `files.status` / `files.tier` 的词义与取值域**定义在 `index/tier.py`**（`F4-03`），
+#: 本模块从那里导入 `STATUSES` / `MAX_TIER` / `STATUS_MIN_TIER` / `STATUS_MAX_TIER`。
+#: 这里只**执行**那条约束、不定义它：`status` 与 `tier` 互相矛盾的行会让某一级
+#: "永远不算就绪"而没有任何一趟会挑到它——**写错一个字母不会报错**，所以
+#: `set_file_extracted()` 的校验与选择条件必须是同一份词表。
 
 #: `put_blob()` 的三种结局（`BlobWrite.action`）。
 #:
@@ -567,6 +595,61 @@ class SqliteStore:
             sql += " WHERE " + " AND ".join(where)
         return int(self._conn.execute(sql, params).fetchone()[0])
 
+    # -------------------------------------------------------------- 分级那一趟
+
+    def tier_counts(self) -> dict[tuple[str, int], int]:
+        r"""盘一次点：`{(status, tier): 条数}`（只列**存在**的组合，没有 0）。
+
+        台账（`tier.TierLedger`，由 `tier.ledger_from()` 从这份计数算出来）与
+        `lsearch status` 都走它。**一条 SQL、一个交叉表**：`status` 与 `tier` 的
+        每种组合各有多少行，剩下的解释全在 `tier.py` 那一侧——那种"算"要能在
+        **不建库**的情况下被测，所以这里只做数据库擅长的那一件事。
+
+        ⚠ 不返回零行：`GROUP BY` 天然只给出现过的组合，而"某个组合是 0"与"某个组合
+        根本不在字典里"在 `ledger_from()` 那边是同一件事（它按 key 累加）。补齐成
+        全表（7 × 3 = 21 个 key）只会多出 21 个需要被维护的常量。
+        """
+        return {
+            (str(status), int(tier)): int(n)
+            for status, tier, n in self._conn.execute(
+                "SELECT status, tier, count(*) FROM files GROUP BY status, tier"
+            )
+        }
+
+    def iter_tier_work(self, tier: int, *, limit: int | None = None) -> Iterator[FileRow]:
+        r"""跑第 `tier` 级那一趟要处理的文件行（`F4-04` 的输入）。**不提交**。
+
+        选择条件来自 `tier.work_condition()`（那里写着"为什么是这个条件"，包括
+        Tier0 那条为什么**没有** `tier < ?` 子句）；这里只把它拼进 `files`。
+
+        **按 `id` 排序**，`id` 就是插入顺序、也就是扫描顺序。这一条是给 `F4-04` 的
+        断点续跑用的：中途 Ctrl-C 之后下一趟要能接着走，而"接着走"只有在**两次
+        遍历的顺序一致**时才有意义——`WHERE` 挑出来的行集合会变（做完的行退出），
+        但顺序不会跳。没有 `ORDER BY` 的话 SQLite 走 `idx_files_tier`，出来的顺序
+        随索引形态变，续跑就会变成"每趟都从头扫一遍的大部分"。
+
+        `limit` 是"这一趟最多吃多少行"（`F4-04` 分批用）。⚠ `limit <= 0` **当场报错**：
+        `LIMIT 0` 是一个合法的 SQL、返回 0 行，于是"这一趟没活干"与"参数写错了"
+        长得一模一样——那正是最难查的一类。（要"什么都不做"，别调这个方法。）
+
+        ⚠ 一次全读进内存是**有意的**：全盘 100 万行时 `Iterator` 会被逐行取，
+        而 `sqlite3` 的游标本来就是惰性的；分页（`LIMIT/OFFSET`）在这里只会更慢，
+        因为 `OFFSET` 要走一遍跳过的行。
+        """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit 要么不传，要么 ≥ 1，收到 {limit}")
+        where, params = work_condition(tier)
+        sql = (
+            "SELECT id, path, volume, ext, mime, size_bytes, mtime_ns, quick_sig,"
+            " content_hash, blob_id, frn, usn, status, tier, indexed_at, error_msg"
+            f" FROM files WHERE {where} ORDER BY id"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (*params, limit)
+        for row in self._conn.execute(sql, params):
+            yield _file_row(row)
+
     # ------------------------------------------------------------------ 检索
 
     def search_paths(self, query: str, *, limit: int = 20) -> PathSearch:
@@ -767,7 +850,7 @@ class SqliteStore:
         那一趟唯一改动已有行的入口——`put_file()` 只插入、不更新（`F4-01` 刻意如此：
         Tier0 那一趟反复跑不该把好行改成坏的）。
 
-        三道校验，都是"写错了不报错、只在很久以后表现为查不出来"的那一类：
+        四道校验，都是"写错了不报错、只在很久以后表现为查不出来"的那一类：
 
         * `status` 必须在 `STATUSES` 里。写错一个字母不会报错，只会让 Tier1 的选择
           条件再也挑不到这个文件。
@@ -775,6 +858,17 @@ class SqliteStore:
           一步"：`fulltext` → `1`，而 `skipped` / `error` 是 `0`（这一类文件本来就
           没做，把它记成 1 等于说它进过正文索引）。"该不该再做"由 `status` 说
           （`F4-03` 的选择条件同时看这两列）。
+        * **这两个列不许互相矛盾**（`F4-03` 加的，`tier.STATUS_MIN_TIER` /
+          `STATUS_MAX_TIER`）：`status` 声称做到的那一级，`tier` 必须至少达到
+          （`fulltext` ⇒ `tier >= 1`、`indexed` ⇒ `tier >= 2`）；反方向只有
+          "什么都没做"的两个 status 有上界（`pending` / `metadata` ⇒ `tier == 0`）。
+          ⚠ 两个方向不对称是因为**后果不对称**：`status='fulltext', tier=0` 那种行
+          下一趟的 `tier < 1 AND status IN (…, 'fulltext', …)` 会**再挑到它一次**，
+          重做一遍正好把它修好；而 `status='metadata', tier=1` 那边三趟都不接它
+          （Tier0 那趟只挑 `pending`、Tier1 那趟要求 `tier < 1`、Tier2 那趟的
+          `status` 名单里没有 `metadata`），它就那样躺在库里，而台账那一侧还把它
+          记成"第 1 级做到了"——**报就绪、其实没有正文**。完整推导写在 `tier.py`
+          的模块文档里。
         * `error_msg` 与 `status` 的对应：`error` **必须**带原因（一个没有原因的失败
           是最难查的记录——每一层都觉得自己没错，`extract/batch.py` 的 `Outcome`
           在那一头把关），其余 status **必须不带**（`error_msg` 非空是全库唯一的
@@ -788,6 +882,19 @@ class SqliteStore:
             raise ValueError(f"status 只能是 {sorted(STATUSES)} 之一，收到 {status!r}")
         if not 0 <= tier <= MAX_TIER:
             raise ValueError(f"tier 只能是 0..{MAX_TIER}，收到 {tier}")
+        floor = STATUS_MIN_TIER.get(status, 0)
+        if tier < floor:
+            raise ValueError(
+                f"status={status!r} 说这个文件做到了第 {floor} 级，而 tier={tier}"
+                f" 比它低——两列在说两件事，其中一件是假的"
+            )
+        ceiling = STATUS_MAX_TIER.get(status)
+        if ceiling is not None and tier > ceiling:
+            raise ValueError(
+                f"status={status!r} 说这个文件什么都没做，而 tier={tier} 说它到过"
+                f"第 {tier} 级：这样的行没有任何一趟会再挑到它（它既不算做完，"
+                f"也不在选择条件里）"
+            )
         msg = (error_msg or "").strip() or None
         if status == _STATUS_WITH_ERROR and msg is None:
             raise ValueError(f"status={status!r} 必须带 error_msg（没有原因的失败查不出来）")

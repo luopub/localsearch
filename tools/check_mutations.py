@@ -745,6 +745,257 @@ MUTATIONS: list[dict[str, object]] = [
                "顺序不定的话同一个查询两次跑出不同的输出——而「哪些文件里有这份内容」"
                "的答案会随扫描顺序漂移（`F6` 的 `--prune` 也会跟着不稳）",
     },
+    # ============================================================== F4-03
+    {
+        "id": "f4-03",
+        "label": "Tier0 那一趟也加上 `tier < ?` 子句",
+        "file": "src/localsearch/index/tier.py",
+        "old": '    if tier == TIER_METADATA:\n        return f"status IN ({marks})", names\n',
+        "new": "",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_tier0_has_no_tier_clause",
+        "why": "⚠ `F4-03` 最容易写错、也最不容易发现的一处：`files.tier` 的默认值就是 0，"
+               "所以 `tier < 0` **恒假**——Tier0 那一趟从此挑不到任何文件，而它不报错、"
+               "不写日志，只见「文件名索引 0 / 1000000 没做完」永远挂着",
+    },
+    {
+        "id": "f4-03",
+        "label": "Tier1 的选择条件用「是什么」写",
+        "file": "src/localsearch/index/tier.py",
+        "old": '    TIER_FULLTEXT: frozenset(STATUSES - TERMINAL_STATUSES - {"pending"}),',
+        "new": '    TIER_FULLTEXT: frozenset({"metadata", "stale"}),',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_body_pass_asks_for_the_rows_that_still_need_a_body",
+        "why": "「是什么」漏掉的是**自相矛盾的行**（如 `status='fulltext', tier=0`）：它既不"
+               "算做完、又不在名单里，于是永远不再被处理。这一格会被永久跳过，"
+               "而库里看不出任何异常",
+    },
+    {
+        "id": "f4-03",
+        "label": "上两级不排除终态（`skipped` / `error`）",
+        "file": "src/localsearch/index/tier.py",
+        "old": '    TIER_FULLTEXT: frozenset(STATUSES - TERMINAL_STATUSES - {"pending"}),',
+        "new": '    TIER_FULLTEXT: frozenset(STATUSES - {"pending"}),',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_both_higher_passes_skip_the_terminal_statuses",
+        "why": "全盘上 `.exe` / `.db` 有几千个，它们**每一趟都会被重新挑出来**再判一次"
+               "「这一类不做」——多花的不是正确性而是每趟几十秒，以及「这一轮处理了"
+               "12 万个文件」这句统计从第一天起就是假的",
+    },
+    {
+        "id": "f4-03",
+        "label": "Tier0 的「做到了」按 `tier >= 0` 数",
+        "file": "src/localsearch/index/tier.py",
+        "old": "    reached[TIER_METADATA] = total - pending",
+        "new": "    reached[TIER_METADATA] = total",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_tier0_done_is_total_minus_pending",
+        "why": "`tier >= 0` 对每一行都成立（0 是默认值）——那是一个**恒真**的判断，"
+               "等于说「名字全进过索引了」。于是「哪几个文件连名字都还没进去」"
+               "这个问题永远得不到答案",
+    },
+    {
+        "id": "f4-03",
+        "label": "就绪的分母一律用总数",
+        "file": "src/localsearch/index/tier.py",
+        "old": "        if tier == TIER_METADATA:\n            return self.total\n        return self.total - self.terminal",
+        "new": "        return self.total",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_denominator_excludes_the_terminal_statuses",
+        "why": "全盘上任何一个 `.exe`（`skipped`）都让正文那一级**永远不算就绪**——"
+               "一个永远为假的标志等于没有标志，而它连着的是 `D10` 那句「显式标注」",
+    },
+    {
+        "id": "f4-03",
+        "label": "空库也报「就绪」",
+        "file": "src/localsearch/index/tier.py",
+        "old": "        if self.is_empty:\n            return False\n        return self.done_at(tier) >= self.expected_at(tier)",
+        "new": "        return self.done_at(tier) >= self.expected_at(tier)",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_an_empty_index_is_never_ready",
+        "why": "空库时两个数都是 0，`0 >= 0` 让三级**全部就绪**——这是这个模块最坏的一种"
+               "错法：它把「根本没索引过」报成「一切正常」，而用户搜不到任何东西时"
+               "拿到的是一句「索引没做完吗？没有啊」",
+    },
+    {
+        "id": "f4-03",
+        "label": "`stale` 的行算作做到了它到过的那一级",
+        "file": "src/localsearch/index/tier.py",
+        "old": '        if status != "stale":\n            for level in (TIER_FULLTEXT, TIER_SEMANTIC):\n                if tier >= level:\n                    reached[level] += count',
+        "new": "        for level in (TIER_FULLTEXT, TIER_SEMANTIC):\n            if tier >= level:\n                reached[level] += count",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_stale_row_does_not_count_as_done_for_the_tier_it_reached",
+        "why": "`stale` 的行内容已经变了、库里那一份是旧的，而它**看起来是有正文的**。"
+               "把它算成就绪就是「报就绪而内容是旧的」——少算一行只会多一句警告，"
+               "多算一行会给出错的答案",
+    },
+    {
+        "id": "f4-03",
+        "label": "台账遇见不认识的 `status` 就跳过",
+        "file": "src/localsearch/index/tier.py",
+        "old": '        if status not in STATUSES:\n            raise ValueError(f"不认识的 status：{status!r}（{STATUSES}）")',
+        "new": "        if status not in STATUSES:\n            continue",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_ledger_refuses_a_status_it_does_not_know",
+        "why": "不认识的 `status` 只有两个来源：手改过库，或者 `schema.sql` 与代码漂了。"
+               "「照单全收」会给出一个**看起来正常**的数（多出来的行算进 `total` 却落在"
+               "三级之外，于是三级全就绪而文件总数对不上）",
+    },
+    {
+        "id": "f4-03",
+        "label": "`target_tier` 按「先看 metadata」的顺序取",
+        "file": "src/localsearch/index/tier.py",
+        "old": "    if tiers.semantic:\n        return TIER_SEMANTIC\n    if tiers.fulltext:\n        return TIER_FULLTEXT\n    if tiers.metadata:\n        return TIER_METADATA\n    return -1",
+        "new": "    if tiers.metadata:\n        return TIER_METADATA\n    if tiers.fulltext:\n        return TIER_FULLTEXT\n    if tiers.semantic:\n        return TIER_SEMANTIC\n    return -1",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_switches_are_cumulative",
+        "why": "三个开关是**累进**的（`metadata` 默认就是 `True`），先看它就等于说"
+               "「配置里永远只做 Tier0」——索引跑得飞快、只有文件名搜得到，"
+               "而所有开关看上去都开着",
+    },
+    {
+        "id": "f4-03",
+        "label": "`status` 声称的级别可以高于 `tier` 记的",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '        floor = STATUS_MIN_TIER.get(status, 0)\n        if tier < floor:\n            raise ValueError(\n                f"status={status!r} 说这个文件做到了第 {floor} 级，而 tier={tier}"\n                f" 比它低——两列在说两件事，其中一件是假的"\n            )\n',
+        "new": "",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_status_that_claims_more_than_the_tier_is_refused",
+        "why": "`status='fulltext', tier=0` 的行会被台账按 `tier` 数成「正文没做」、"
+               "被选择条件按 `status` 跳过——两边各自看都没错，合起来是「那一级永远"
+               "不就绪」，而没有任何一趟会去修它",
+    },
+    {
+        "id": "f4-03",
+        "label": "`status` 说「什么都没做」却带着 `tier`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '        ceiling = STATUS_MAX_TIER.get(status)\n        if ceiling is not None and tier > ceiling:\n            raise ValueError(\n                f"status={status!r} 说这个文件什么都没做，而 tier={tier} 说它到过"\n                f"第 {tier} 级：这样的行没有任何一趟会再挑到它（它既不算做完，"\n                f"也不在选择条件里）"\n            )\n',
+        "new": "",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_status_that_claims_nothing_cannot_have_a_tier",
+        "why": "`status='metadata', tier=1` 那种行**三趟都不接它**（Tier0 只挑 `pending`、"
+               "Tier1 要求 `tier < 1`、Tier2 的 status 名单里没有 `metadata`），"
+               "而台账还把它记成「第 1 级做到了」——**报就绪、其实没有正文**",
+    },
+    {
+        "id": "f4-03",
+        "label": "`iter_tier_work` 接受 `limit=0`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '        if limit is not None and limit < 1:\n            raise ValueError(f"limit 要么不传，要么 ≥ 1，收到 {limit}")\n',
+        "new": "",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_non_positive_limit_is_refused",
+        "why": "`LIMIT 0` 是合法的 SQL、返回 0 行——于是「这一趟没活干」与「分批的"
+               "那个参数写错了」长得一模一样，而 `F4-04` 的续跑正是在这里判「跑完了」",
+    },
+    {
+        "id": "f4-03",
+        "label": "`tier_counts` 忘了 `GROUP BY`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '"SELECT status, tier, count(*) FROM files GROUP BY status, tier"',
+        "new": '"SELECT status, tier, count(*) FROM files"',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_tier_counts_groups_by_status_and_tier",
+        "why": "SQLite 允许「裸列 + 聚合」（返回其中任意一行的 `status`/`tier`），"
+               "于是这条查询**不报错**、只返回一行：台账从此永远说「库里只有 1 个"
+               "文件」，而三级进度全部基于那一行",
+    },
+    {
+        "id": "f4-03",
+        "label": "命令行明确要的语义检索被悄悄换成词法",
+        "file": "src/localsearch/search/tier.py",
+        "old": "        if explicit:\n            raise ModeUnavailable(requested, IMPLEMENTED_MODES)\n",
+        "new": "",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_named_semantic_mode_is_refused_rather_than_silently_downgraded",
+        "why": "`A8` 里「不允许静默」那半句最要紧的一格：一个人要的是「意思相近」，"
+               "而词法检索会给出一堆**看起来合理**的关键词命中——他没有任何办法"
+               "察觉自己拿到的是另一种东西",
+    },
+    {
+        "id": "f4-03",
+        "label": "`IMPLEMENTED_MODES` 把没实现的模式也算上",
+        "file": "src/localsearch/search/tier.py",
+        "old": 'IMPLEMENTED_MODES = frozenset({"lexical"})',
+        "new": "IMPLEMENTED_MODES = frozenset(MODES)",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_lexical_is_the_mode_that_works_today",
+        "why": "这一个常量是「哪些模式真的能跑」的唯一来源，降级与拒绝都读它。"
+               "写成全量就等于宣称 `P5` 已经做完了：`--mode semantic` 不再被拒，"
+               "一路走到一个没有向量的检索引擎上",
+    },
+    {
+        "id": "f4-03",
+        "label": "`hybrid` 降级时跳过 `semantic` 直接落到 `lexical`",
+        "file": "src/localsearch/search/tier.py",
+        "old": '    "hybrid": ("hybrid", "semantic", "lexical"),',
+        "new": '    "hybrid": ("hybrid", "lexical"),',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_hybrid_falls_back_to_semantic_before_lexical_once_vectors_exist",
+        "why": "那张表里的**顺序**表达的是「谁是谁的子集」。跳过 `semantic` 在 `P4` 上"
+               "看不出区别（两级都不能跑），到 `P5` 那天就是用户白丢一半语义命中，"
+               "而代码一个字都不用改",
+    },
+    {
+        "id": "f4-03",
+        "label": "`semantic` 降级时不留词法这个底座",
+        "file": "src/localsearch/search/tier.py",
+        "old": '    "semantic": ("semantic", "lexical"),',
+        "new": '    "semantic": ("semantic",),',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_a_configured_semantic_mode_downgrades_and_says_语义未就绪",
+        "why": "`lexical` 是唯一一个**永远在**的模式（它不依赖任何一级索引的额外"
+               "产物）。降级表里把它删掉之后，配置里写了 `mode = \"semantic\"` 的人"
+               "连搜索都跑不起来——而那是模板里默认值的近邻",
+    },
+    {
+        "id": "f4-03",
+        "label": "降级那句话把「词法」写死",
+        "file": "src/localsearch/search/tier.py",
+        "old": "                _DOWNGRADE_TEMPLATE[requested].format(\n                    label=_MODE_LABEL[effective], limit=_MODE_LIMIT[effective]\n                ),",
+        "new": '                _DOWNGRADE_TEMPLATE[requested].format(\n                    label="词法（关键词）", limit="只按关键词命中，换个说法搜不到"\n                ),',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_hybrid_falls_back_to_semantic_before_lexical_once_vectors_exist",
+        "why": "`P5` 之后 `hybrid` 会先落到 `semantic`，那时写死的那句话就成了一处"
+               "**看起来正常**的错话——它描述的是一种这一趟没有发生的检索。"
+               "`F4-03` 第一版就是这么写的，被这条变体自己的测试抓住过",
+    },
+    {
+        "id": "f4-03",
+        "label": "标注不看 `target_tier`",
+        "file": "src/localsearch/search/tier.py",
+        "old": "        if tier > target or not ledger.can_reach(tier) or ledger.ready(tier):\n            continue",
+        "new": "        if not ledger.can_reach(tier) or ledger.ready(tier):\n            continue",
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_switching_a_level_off_silences_its_note",
+        "why": "配置里 `fulltext = false` 意味着 Tier1 永远不做，此时还一直警告"
+               "「正文未就绪」就是一句**永远为真的废话**——而永远为真的警告会被"
+               "学会忽略，连带着真警告一起被忽略",
+    },
+    {
+        "id": "f4-03",
+        "label": "`TIER_NAMES` 与 `TiersCfg` 的字段名漂开",
+        "file": "src/localsearch/index/tier.py",
+        "old": '    TIER_FULLTEXT: "fulltext",',
+        "new": '    TIER_FULLTEXT: "content",',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_three_tier_names_are_the_config_field_names",
+        "why": "配置里写 `[tiers] fulltext = false`、日志里说「停在 fulltext」、报表的列名"
+               "是 `fulltext`——三处是同一个词。改名之后这句配置**看起来关掉了正文那一"
+               "层**，而代码读的是另一个名字",
+    },
+    {
+        "id": "f4-03",
+        "label": "第 2 级那句标注不再说「语义未就绪」",
+        "file": "src/localsearch/search/tier.py",
+        "old": '        "语义未就绪：{done} / {expected}。向量还没建完，这一级现在给不出结果；"',
+        "new": '        "向量还没建完：{done} / {expected}。这一级现在给不出结果；"',
+        "tests": ["tests/unit/test_tier_state.py"],
+        "expect": "test_the_tier2_note_speaks_up_once_semantic_mode_really_exists",
+        "why": "「语义未就绪」是计划与 `CLAUDE.md` 点名的那句话，也是 `A8` 唯一的"
+               "可观察形态。改措辞可以，改掉这五个字就是把验收项指认的那个字符串"
+               "删了——而测试里钉的就是它",
+    },
 ]
 
 
