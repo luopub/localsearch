@@ -16,14 +16,20 @@ r"""`lsearch` 命令行入口（P1 / `F1-04`）。测试落点 `tests/unit/test_
    注意 `bootstrap_env` 是 `setdefault` 语义，本机已有的 `HF_HOME` 一字不动。
 
 **3. 只注册真的能跑的命令。**
-   `search` / `status` / `bench` 属于后面的阶段，**现在不挂上去**。
+   `status` / `explain` / `bench` / `reindex` 属于后面的阶段，**现在不挂上去**。
    挂一个能列出、一跑就崩的命令，用户读到的是"这命令有 bug"，而不是"这功能还没做"——
    前者会让人去查一个不存在的问题。
 
-   `index` 是个**半分**的情形（`F2-06`）：它的 `--dry-run` 是真的、能跑、有测试，
-   而"真的去索引"要等 P3/P4/P5。挂上去的理由是**命令自己会拒绝**：没有 `--dry-run`
-   时它打印缺哪三块并以退出码 2 结束（`cli/commands/index.py`），不会静默跑出一个
-   空结果。判定标准因此不是"这条命令有没有完全实现"，而是"它会不会给出误导的结果"。
+   `index` 曾经是个**半分**的情形（`F2-06`：那时只有 `--dry-run` 是真的，命令靠
+   "自己会拒绝"换来注册），`F4-04` 之后它不再半分：两趟都跑得起来，`--dry-run` 与
+   真索引两条路都有自己的测试。`search` 同样在 `F4-04` 落地（最小的那一版，只有词法；
+   语义那一半到不了时**显式标注**「语义未就绪」，见 `commands/search.py`）。
+
+   判定标准始终不是"这条命令有没有完全实现"，而是**"它会不会给出误导的结果"**：
+   `search --mode semantic` 现在仍然做不到，但它**拒绝**而不是悄悄按词法跑。
+   两张名单（`test_cli.py` 里那份 `PLANNED_COMMANDS` 与 `NOT_YET_IMPLEMENTED`）
+   必须恰好拼成计划 §4.6 的命令面——这条不变量由
+   `test_the_two_lists_partition_the_planned_command_surface` 钉住。
 
 **4. 无参数运行只打印帮助。**
    交互式 REPL 是 P5 的 `F5-07`（D7 定的"一次性命令 + REPL 双形态"）。
@@ -42,6 +48,7 @@ from localsearch import __version__
 from localsearch.cli.commands.config import config_app
 from localsearch.cli.commands.doctor import doctor
 from localsearch.cli.commands.index import index
+from localsearch.cli.commands.search import search
 from localsearch.cli.state import CliState
 from localsearch.core.console import use_safe_output
 from localsearch.core.config import (
@@ -60,16 +67,23 @@ from localsearch.core.logging import setup_logging
 #: 目录里留下目录和日志文件——那会让"检查过"这件事本身改变被检查的对象。
 #: 真要留下它们的输出，重定向终端即可。
 #:
-#: ⚠ **`index` 在这里是因为它现在只做只读的 `--dry-run`**（`F2-06`）。它一被排除，
-#: 就**不需要**回答"怎么按参数决定要不要写日志"这个问题——而 Click 在调用根回调
+#: ⚠ **`index` 留在这里，但理由变了**（`F4-04`）：它不再是"只读命令"，而是**按自己
+#: 的参数决定**——`--dry-run` 不留任何落点（那是它对用户的承诺），真索引在跑起来之前
+#: 由**命令自己**把文件 handler 补上（`commands/index.py` 的 `_enable_file_log()`）。
+#:
+#: 原先这里写着"按 `--dry-run` 决定要不要写日志本来也做不到，因为 Click 在调用根回调
 #: **之前**就把子命令的参数清空了（`test_cli.py` 的
-#: `test_broken_config_blocks_every_command` 记着这件事），按 `--dry-run` 取值本来也
-#: 取不到。**真正去索引的那一天（P4），`index` 必须从这张表里删掉**——那时它要留下
-#: 日志，而"忘了删"的症状是"任务跑过了但日志里什么都没有"，与"根本没跑"长得一样。
+#: `test_broken_config_blocks_every_command` 记着这件事）"。那句话**只对根回调成立**：
+#: 根回调确实看不到 `--dry-run`，而这个命令自己看得到——把决定晚一点做就行了，
+#: 不必不做。所以这一条的到期条件从"P4 必须删掉"变成"这一条不到期"。
+#:
+#: `search` 在这里是因为它**确实是只读的**：它连日志文件都不需要（它的输出就是
+#: 答案本身），而且它要能在数据目录还不存在时给出那句"还没有索引库"。
 LOG_FILE_EXEMPT_COMMANDS = {
     "config": "只读的配置管理（show / path / init 都不需要索引库）",
     "doctor": "只读的环境自检，且要在数据目录还不存在时也能跑",
-    "index": "现在只有 --dry-run（只统计不落库）。⚠ P4 落地真索引时必须从本表删除",
+    "index": "按参数决定：--dry-run 不留落点，真索引由命令自己补上文件日志（F4-04）",
+    "search": "只读检索：输出就是答案，且要在数据目录还不存在时给出提示",
 }
 
 #: 用了但没有给出子命令时的退出码。2 是"用法不对"的惯例值（与 Click 对用法错误的取值一致）。
@@ -80,8 +94,9 @@ app = typer.Typer(
     help=(
         "本地离线全盘全文搜索。\n\n"
         "现在能用的：`config`（配置管理）、`doctor`（环境自检）、"
-        "`index --dry-run`（按规则看扫描会排除掉什么，不落库）。"
-        "真正的索引、检索、状态等命令在后面的阶段落地。"
+        "`index`（建索引，`--dry-run` 只统计不落库）、"
+        "`search`（检索，现在只有词法——语义那一半要等 P5，会显式标注「语义未就绪」）。"
+        "`status` / `explain` / `bench` / `reindex` 在后面的阶段落地。"
     ),
     # 不能用 no_args_is_help：Click 在调用回调**之前**就检查"有没有子命令"，
     # 于是 `lsearch --version`（只有全局选项、没有子命令）会先被判为 Missing command，
@@ -95,6 +110,7 @@ app.add_typer(config_app, name="config")
 # 而计划 §4.6 的命令面写的是 `lsearch doctor`。
 app.command("doctor")(doctor)
 app.command("index")(index)
+app.command("search")(search)
 
 
 @app.callback()

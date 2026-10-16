@@ -6,7 +6,7 @@
   "有没有子命令"。所以 `lsearch --version`（只有全局选项、没有子命令）会先被判成
   Missing command，回调里的 `--version` 根本执行不到。本文件的第一版就是这么写的，
   症状是 `--version` 打印用法错误、退出码 2。
-- `test_unimplemented_commands_are_not_registered`：挂上一个能列出、一跑就崩的命令，
+- `test_only_implemented_commands_are_registered`：挂上一个能列出、一跑就崩的命令，
   用户读到的是"这命令有 bug"而不是"这功能还没做"，会去查一个不存在的问题。
 - `test_read_only_commands_leave_no_trace`：只读命令为了回答"环境对不对"就在数据目录里
   建目录、写日志，会让"检查过"这件事本身改变被检查的对象（A7）。
@@ -28,10 +28,23 @@ from localsearch.core import config as config_mod
 from localsearch.core.config import load_config
 from localsearch.core.logging import reset_logging
 
-#: 计划 §4.6 的命令面里，还没实现的那些。
-#: 刻意**不含** `doctor`（F1-05 的交付物）与 `index`（F2-06 只实现了它的 `--dry-run`，
-#: 行为测试在 `test_cli_index_dryrun.py` 里；本文件只保留"它已被注册"这一条）。
-NOT_YET_IMPLEMENTED = ("search", "status", "explain", "bench", "reindex")
+#: 计划 §4.6 的命令面，**整份**。下面那两条测试靠它把"已实现"与"还没实现"分成两半，
+#: 而这两半必须恰好拼成这一份——多一个少一个都是接线漏了（见那条测试的文档）。
+PLANNED_COMMANDS = (
+    "config",
+    "doctor",
+    "index",
+    "search",
+    "status",
+    "explain",
+    "bench",
+    "reindex",
+)
+
+#: 计划 §4.6 的命令面里，还没实现的那些。`search` 在 `F4-04` 落地（最小的那一版，
+#: 行为测试在 `test_cli_search.py`），`index` 的真索引同样在 `F4-04` 落地
+#: （`test_index_resume.py`）；这一行里的每一个都是**已经确认不想现在挂上去**的。
+NOT_YET_IMPLEMENTED = ("status", "explain", "bench", "reindex")
 
 
 @pytest.fixture(autouse=True)
@@ -156,16 +169,25 @@ def test_only_implemented_commands_are_registered() -> None:
         )
 
 
-def test_index_is_registered_even_though_only_dry_run_works() -> None:
-    """`index` 是"只注册真的能跑的命令"这一条的**半分例外**，判定标准写在这里。
+def test_the_two_lists_partition_the_planned_command_surface() -> None:
+    """命令面被"已注册"与"还没实现"**恰好分成两半**，两个方向都要钉。
 
-    它被挂上去是因为**命令自己会拒绝**：没有 `--dry-run` 时打印缺哪三块并退出码 2
-    （行为在 `test_cli_index_dryrun.py` 里逐条钉住），不会静默跑出一个看着正常的空结果。
-    所以这一条不是"它实现了"，而是"它不会误导人"——
-    这也意味着 `NOT_YET_IMPLEMENTED` 那张名单的判据不是"阶段到了没有"。
+    `F4-04` 之前这里钉的是 `index` 那个"半分例外"（它靠**自己会拒绝**换来了注册）。
+    真索引落地之后那条例外没了，剩下的是一条更要紧的不变量——**两张名单必须对得上**：
+
+    - 注册了却还留在 `NOT_YET_IMPLEMENTED` 里 → 那张名单在骗人。这个失败形态**真的
+      发生过**：`F4-04` 把 `search` 挂上去时忘了划掉，于是
+      `test_unimplemented_command_is_a_usage_error[search]` 跑到一半才发现自相矛盾。
+    - 名单里有、两块都没有 → 计划 §4.6 的命令面少了一条，而它**不报错**：
+      `lsearch <那个命令>` 只是回一句 `No such command`，与"还没实现"长得一样。
     """
-    assert "index" in registered_names()
-    assert "index" not in NOT_YET_IMPLEMENTED
+    names = registered_names()
+    assert names | set(NOT_YET_IMPLEMENTED) == set(PLANNED_COMMANDS), (
+        "命令面与计划 §4.6 对不上：注册的那些加上没实现的那些，应当恰好是整份名单"
+    )
+    assert not (names & set(NOT_YET_IMPLEMENTED)), (
+        "名单里有的命令其实已经注册了——实现之后忘了把它划掉，那张名单就不再可信"
+    )
 
 
 @pytest.mark.parametrize("name", NOT_YET_IMPLEMENTED)
@@ -348,25 +370,33 @@ def test_log_file_is_exempt_exactly_for_read_only_commands() -> None:
     """写入日志文件的那条判断，规则要能一眼看清是**哪些**命令被豁免、**为什么**。
 
     `doctor` 在 F1-05 落地时也应当在这一格里——它是只读诊断，同样不留落点。
-    `index` 在 F2-06 落地时进这一格，因为它那时只做只读的 `--dry-run`；**它的理由
-    栏里写着 P4 必须把它删掉**，这一条下面单独钉。
+    `index` 留在这里，但**理由栏在 `F4-04` 换过一次**（下面单独钉）。
     """
     assert "config" in LOG_FILE_EXEMPT_COMMANDS
     for name, why in LOG_FILE_EXEMPT_COMMANDS.items():
         assert why.strip(), f"`{name}` 被豁免了日志，但没写原因——这张表最容易被顺手改错"
 
 
-def test_index_exemption_says_when_to_remove_it() -> None:
-    """`index` 的豁免是**暂时的**，且到期条件必须写在表里。
+def test_the_index_exemption_no_longer_expires() -> None:
+    """`index` 的豁免**从"到 P4 必须删掉"变成了"这一条不再到期"**，理由栏要跟着改。
 
-    真正去索引的那天它要写日志，而"忘了把它从豁免表里删掉"的症状是
-    "任务跑过了但日志里什么都没有"——与"根本没跑"长得一样，属于最难查的一类。
-    把到期条件写进值里，是为了让改的人（很可能是几个月后的我）在读到这一行时
-    就知道该做什么，而不是去猜这张表当初为什么这么填。
+    原先那张表里写着"P4 那天必须删掉这一行"，因为真索引落地之后它就该写日志，
+    而"忘了删"的症状是"任务跑过了但日志里什么都没有"——与"根本没跑"长得一样。
+    `F4-04` 落地时**没有**删掉它，而是把决定权交给了命令自己：`--dry-run` 不留落点
+    （那是它对用户的承诺），真索引在跑起来之前自己把文件 handler 补上。理由是那句
+    "做不到"**只对根回调成立**——Click 在根回调之前就清空了子命令的参数，而这个命令
+    自己看得到（详见 `cli/main.py` 那段注释）。
+
+    所以这一条钉两件事：**旧理由不见了**（否则下一个人会照着一句已经作废的话去删一行
+    现在删不得的表项），以及**新理由说清了决定权在哪儿**——只写"按参数决定"而不写
+    "谁在执行这个决定"，读的人仍然要去猜。
     """
     why = LOG_FILE_EXEMPT_COMMANDS["index"]
-    assert "P4" in why, "到期条件不见了：写清楚哪一天必须把它删掉"
-    assert "dry-run" in why, "要说明它现在凭什么被豁免"
+    assert "必须删" not in why and "还没实现" not in why, (
+        "理由栏里还留着作废的到期条件：照着它去删，真索引那一趟就没有文件日志了"
+    )
+    assert "--dry-run" in why, "要说明两个模式里哪一个才是不留落点的那一个"
+    assert "命令自己" in why, "要指出去哪儿看这个决定（`cli/commands/index.py`）"
 
 
 # ==============================================================================

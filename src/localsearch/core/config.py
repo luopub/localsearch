@@ -158,6 +158,20 @@ class Config:
     def log_dir_path(self) -> Path:
         return self.data_dir_path / "logs"
 
+    def index_dir_path(self) -> Path:
+        """索引库与向量索引所在的那一层（计划 §3.3 的 `index/`）。"""
+        return self.data_dir_path / "index"
+
+    @property
+    def db_path(self) -> Path:
+        """索引库的落点（计划 §3.3：`data_dir/index/lsearch.db`）。
+
+        **它是"库在哪儿"唯一的真相来源**——`lsearch index` 写它、`lsearch search` 与
+        将来的 `status` / `explain` 读它。写在别处（比如各自的命令里拼一次）就会
+        出现"索引写进 A、检索去 B 里找"这种分叉，而它的症状是"搜什么都没结果"。
+        """
+        return self.index_dir_path() / "lsearch.db"
+
 
 # ==============================================================================
 # 校验规则：一张表，避免 30 个键散在 30 个 if 里

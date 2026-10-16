@@ -3,9 +3,11 @@ r"""F2-06：`lsearch index --dry-run` 与它的账目模块。测试落点。
 被测模块有两个，测试也在两半：
 
 1. **`ingest/report.py`**（分桶与计数）——纯内存，不需要配置文件、不碰磁盘。
-2. **`cli/commands/index.py`**（命令行为）——按 `F2-06` 的定义，它有两件事同样重要：
-   **该拒绝的时候拒绝**（没有 `--dry-run` 就说清楚缺哪三块），
-   以及 **dry-run 不留任何落点**（不写库、不写日志、连数据目录都不建）。
+2. **`cli/commands/index.py`** 的 `--dry-run` 那一半——`F2-06` 时它有两件事同样重要：
+   **该拒绝的时候拒绝**，以及 **dry-run 不留任何落点**（不写库、不写日志、连数据目录
+   都不建）。`F4-04` 之后前一条换了个对象（拒绝的是配置错误，不再是"真索引还没落地"，
+   见第 1 节那段注释）；**真索引**那一半归 `tests/unit/test_index_resume.py`，
+   本文件不再管它。
 
 ------------------------------------------------------------------------------
 这一半为什么必须自己有一份 sandbox
@@ -161,40 +163,42 @@ def row_containing(out: str, label: str) -> str:
 
 
 # ==============================================================================
-# 1. 没有 --dry-run 就拒绝，且说清楚缺什么
+# 1. 两条路都不许有落点：`--dry-run` 与"被拒绝"
 # ==============================================================================
+#
+# `F2-06` 的版本在这里钉的是"没有 `--dry-run` 就拒绝、且拒绝不留落点"（那时真索引
+# 还没落地，缺 P3/P4/P5 三块）。`F4-04` 把真索引做出来了，那两条随之作废：
+# 缺的三块已经不缺、`index` 也不再靠"自己会拒绝"换来注册。**新的那一条**是同一个
+# 主题的延续：拒绝仍然不该有落点，只是现在被拒绝的是**配置错误**而不是"没实现"。
+# 真索引自己的账（建库、建日志、退出码）在 `test_index_resume.py` 里。
 
 
-def test_it_refuses_to_build_an_index_without_dry_run(
+def test_a_refused_config_error_leaves_no_trace(
     sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`lsearch index` 现在**拒绝执行**，退出码 2，并点名缺哪三块。
+    r"""`index --all-drives` 被拒绝（退出码 2），且**连数据目录都不建**。
 
-    这条是 `main.py` 第 3 条（"不注册跑不起来的命令"）的延伸：命令能被注册，
-    是因为它自己会拒绝。拒绝的理由必须**可执行**——只说"还没实现"，
-    用户下一条命令仍然是猜的；这里要能读出"那我现在该敲什么"。
+    这是同一个主题在 `F4-04` 之后的形态。它同时钉住一个**真实发生过的回归**：
+    `F4-04` 把 `make_scanner()` 从 `_dry_run()` 里拉出来时漏了那道
+    `except ScanError`，于是 `all_drives` 报错的那条路**甩一屏 traceback、退出码 1**。
+    退出码 1 在计划 §4.8 里的意思是"跑完了但有文件没成"——启动器会把它当成"该看一眼"
+    而不是"配置错了"，用户拿到的是一句"索引中止"的谎话。
+
+    落点这一半同样重要：扫描器是在 `SqliteStore.open()` **之前**造的（`_open_scanner`
+    的文档记着理由）。顺序反了的话，一次被拒绝的 `index` 会留下一个**空库**，
+    而那个空库会让之后每一次 `lsearch search` 都以为"索引已经建好了"。
     """
-    code, out, err = run(sandbox, capsys, "index")
+    data_dir = sandbox["data_dir"]
+    code, out, err = run(sandbox, capsys, "index", "--all-drives")
     text = flat(out + " " + err)
-    assert code == 2
-    for token in ("P3", "P4", "P5"):  # 缺的三块，各自点名
-        assert token in text, f"拒绝理由里没提 {token}：{text}"
-    assert "空库" in text, "要说清楚'跑真索引会得到什么'，而不是只说'没实现'"
-    assert "index --dry-run" in text, "拒绝之后要给出下一条能敲的命令"
+    assert code == 2, f"配置错误应当是退出码 2，不是崩溃也不是 1：{text}"
+    assert "无法开始" in text and "E10" in text
+    assert "Traceback" not in text
+    assert not data_dir.exists(), "被拒绝的那一趟在数据目录里留下了东西"
 
-
-def test_the_refusal_does_not_create_the_data_directory(
-    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    """**拒绝的那条路也不许有落点**。
-
-    这是设计上真实存在过的分叉：如果 `index` 按"要干活的工作命令"记日志，那么
-    连"拒绝执行"这一次都会先在 `data_dir` 下建出 `logs/`——一个只用来报错的命令
-    改变了被检查的对象（`A7`）。现在 `index` 挂在 `LOG_FILE_EXEMPT_COMMANDS` 里，
-    所以两条路都干干净净。`test_cli.py` 里那条"豁免的到期条件"钉的是另一半。
-    """
-    assert run(sandbox, capsys, "index")[0] == 2
-    assert not sandbox["data_dir"].exists()
+    # `--dry-run` 是**同一条**路（同一个扫描器、同一句拒绝），只差要不要落库
+    assert run(sandbox, capsys, "index", "--dry-run", "--all-drives")[0] == 2
+    assert not data_dir.exists()
 
 
 def test_dry_run_leaves_no_trace_either(
@@ -532,20 +536,24 @@ def test_all_drives_is_refused_with_the_measured_reason(
     assert "E10" in text
 
 
-def test_options_that_dry_run_cannot_honour_are_not_declared(
+def test_options_that_nothing_can_honour_are_not_declared(
     sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--workers` / `--tier` / `--rebuild` 这些**故意没声明**，报的是用法错误。
+    """`--workers` / `--rebuild` / `--prune` **故意没声明**，报的是用法错误。
 
-    计划 §4.6 给 `index` 列了它们，但 dry-run 兑现不了。声明了却不用，用户读到的
-    是一句谎话（`--workers 8` 给了、没反应）；**偷偷忽略**更糟——同类的先例是
-    `backend = "mft"` 直接报错而不是静默按 scandir 跑（F2-01 的偏差第 6 条）。
-    它们要和 P4 的真索引一起落地，那一天这条测试就该删或改：它挡的是一个
-    到那时已不存在的问题。
+    计划 §4.6 给 `index` 列了它们，但这一版兑现不了：`--workers` 是**嵌入**的并行
+    （Tier1 那一段是单进程顺序跑，`P5` 才有意义），`--rebuild` / `--prune` 要"按路径
+    删行"，那条路要处理 `files_fts` 的孤儿行与 `R14` 的"只在真正可达的卷内删"
+    （归 `F6-03`）。声明了却不用，用户读到的是一句谎话（`--workers 8` 给了、没反应）；
+    **偷偷忽略**更糟——同类的先例是 `backend = "mft"` 直接报错而不是静默按 scandir 跑。
+
+    ⚠ 这一条在 `F4-04` **缩过一次**：原先里面还有 `--tier` 与 `--resume`，它们随真索引
+    一起落地了（行为在 `test_index_resume.py` 的 CLI 那一段里逐条钉住）。名单要跟着
+    缩小——留着的话，这条测试会挡一个已经不存在的"没实现"。
     """
-    for option in ("--workers", "--tier", "--rebuild", "--resume", "--prune"):
-        code, out, err = run(sandbox, capsys, "index", "--dry-run", option, "8")
-        assert code == 2, f"{option} 被声明了，而 dry-run 兑现不了它"
+    for option in ("--workers", "--rebuild", "--prune"):
+        code, out, err = run(sandbox, capsys, "index", option, "8")
+        assert code == 2, f"{option} 被声明了，而这一版兑现不了它"
         assert "No such option" in flat(out + err)
 
 

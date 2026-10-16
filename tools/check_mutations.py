@@ -996,6 +996,230 @@ MUTATIONS: list[dict[str, object]] = [
                "可观察形态。改措辞可以，改掉这五个字就是把验收项指认的那个字符串"
                "删了——而测试里钉的就是它",
     },
+    # ------------------------------------------------------------------ f4-04
+    # 编排（`index/build.py`）与两个命令面（`cli/commands/`）。这一层最容易出的错
+    # 是"**什么都不做也看着正常**"：批没提交（库里少一片，但报告说完成了）、
+    # 目录也写了行（多几行假文件）、复用那一问没问（白提取一遍）……
+    # 每一条变体的 `why` 写的都是那个坏结果**在终端上看起来是什么样**。
+    {
+        "id": "f4-04",
+        "label": "目录也写一行进 `files`",
+        "file": "src/localsearch/index/build.py",
+        "old": "        if entry.is_dir:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_tier0_writes_files_and_leaves_directories_out",
+        "why": "`files` 里没有'这一行是目录'这一列，写进去的一行目录与一个 0 字节的文件"
+               "**完全分不开**；接着 Tier1 会去提取它，`content_hash()` 在目录上抛 "
+               "`IsADirectoryError`，被记成一笔失败。全盘上目录是百万级的——"
+               "那就是百万条**全部是假的失败**，而报告看起来只是'坏文件有点多'",
+    },
+    {
+        "id": "f4-04",
+        "label": "Tier0 跑完不再收尾提交",
+        "file": "src/localsearch/index/build.py",
+        "old": "    store.commit()\n    stats.commits += 1\n    stats.seconds = time.monotonic() - started\n    return stats",
+        "new": "    stats.seconds = time.monotonic() - started\n    return stats",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_tier0_commits_every_n_files_and_once_more_at_the_end",
+        "why": "最后一个不满一批的尾巴就交给 `close()` 的兜底，而兜底只在**正常退出**时"
+               "发生。被 Ctrl-C 或断电打断时那一批**没了**，而终端上最后一次进度行说的是"
+               "'已写 N 行'——用户以为它在库里",
+    },
+    {
+        "id": "f4-04",
+        "label": "Tier0 中途一次也不提交",
+        "file": "src/localsearch/index/build.py",
+        "old": "        if since_commit >= every:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_tier0_commits_every_n_files_and_once_more_at_the_end",
+        "why": "全盘的 300 多万个条目会落在**一个**事务里：中断丢整趟（`A1` 的续跑"
+               "从头再来一遍），内存随事务长（`R1` 那类'扫到一半机器没响应'）。"
+               "唯一看得出来的是事务日志的大小，而没人会去看它",
+    },
+    {
+        "id": "f4-04",
+        "label": "超限文件记成 `metadata` 而不是 `skipped`",
+        "file": "src/localsearch/index/build.py",
+        "old": "        return STATUS_SKIPPED",
+        "new": "        return STATUS_METADATA",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_tier0_marks_over_limit_files_name_only",
+        "why": "`metadata` 不是终态，于是 Tier1 会去提取它——而它存在的理由正是"
+               "**不要**读它（64 MiB 以上的日志、镜像）。读进来的是几百 MB 的正文、"
+               "还要切片，而进度条上只有'正文 N 片'变大了",
+    },
+    {
+        "id": "f4-04",
+        "label": "A9：不再先问库里有没有这份内容",
+        "file": "src/localsearch/index/build.py",
+        "old": "    known = store.find_blob(digest, parser_ver=ver)",
+        "new": "    known = None",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_the_same_content_is_extracted_only_once",
+        "why": "`A9` 的字面要求是'同一份内容只**提取**与嵌入一次'。只靠 `put_blob()` 的"
+               "`reused` 做不到那一半：走到那里时文件已经读进来、正文已经解析出来了。"
+               "第二次提取白做，而结果**完全正确**——只是慢，且慢得没有理由",
+    },
+    {
+        "id": "f4-04",
+        "label": "`find_blob()` 与 `put_blob()` 漂了也照跑",
+        "file": "src/localsearch/index/build.py",
+        "old": "    if not write.needs_chunks:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_find_blob_and_put_blob_must_agree",
+        "why": "跳过 `put_chunks()` 会在库里留下一行**声称有正文、其实一片都没有**的记录："
+               "搜不到，且不报错。两个方法的判据本该是同一个 `WHERE`——这条守卫是"
+               "那条耦合唯一的哨兵",
+    },
+    {
+        "id": "f4-04",
+        "label": "批次没推进时改成静默退出",
+        "file": "src/localsearch/index/build.py",
+        "old": "            raise BuildError(\n                f\"这一批没有推进",
+        "new": "            break\n            raise BuildError(\n                f\"这一批没有推进",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_a_batch_that_does_not_advance_stops_loudly",
+        "why": "⚠ 这一条**不能**写成 `if first == previous_first:` → `if False`：那样"
+               "`while True` 会**真的转不完**，而这个工具的 `subprocess.run` 没有超时，"
+               "整次检查会挂在那里。改成 `break` 才是那个坏行为的最小等价物——"
+               "安静地退出、报告说'跑完了'，而库里那一行还在最前面，下一趟再挑中它",
+    },
+    {
+        "id": "f4-04",
+        "label": "`parser_ver` 的 `chunk` 段丢掉两个参数",
+        "file": "src/localsearch/index/build.py",
+        "old": '        f"|chunk:{chunk.target_tokens}:{chunk.overlap_ratio:g}:{chunk.max_chunks_per_doc}"',
+        "new": '        f"|chunk:{chunk.target_tokens}"',
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_the_parser_version_shape_is_a_literal_contract",
+        "why": "`parser_ver` 是'这份切片该不该重切'的**唯一**判据。少了两个参数之后"
+               "`lsearch index --max-chunks-per-doc 10` 写下的版本与上一趟**一模一样**，"
+               "于是换参数永远不重切——而库里那些切片确实是按旧参数切的，搜出来的正文"
+               "看起来没问题。⚠ 这一条的第一版**一条测试都没红**（三个断言都是拿 "
+               "`parser_ver()` 现算一份来比的），那条字面契约的测试是跟着它补出来的",
+    },
+    {
+        "id": "f4-04",
+        "label": "`--resume` 不再跳过 Tier0",
+        "file": "src/localsearch/index/build.py",
+        "old": "    if not resume and target_tier >= TIER_METADATA:",
+        "new": "    if target_tier >= TIER_METADATA:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_resume_skips_tier0_and_finishes_what_is_left",
+        "why": "`--resume` 的**全部**意思就是'这一趟不重新扫盘'（接续本身不需要开关，"
+               "普通 `index` 本来就接着上次跑）。不跳的话它在 `E11` 那个读数上是"
+               "300 多万个目录项白走一遍——而输出与'跳过了'一模一样",
+    },
+    {
+        "id": "f4-04",
+        "label": "`--tier 0` 照样去做正文",
+        "file": "src/localsearch/index/build.py",
+        "old": "    if target_tier >= TIER_FULLTEXT:",
+        "new": "    if True:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_target_tier_zero_stops_before_the_body_pass",
+        "why": "`--tier 0` 是'先只建名字这一层就够用了'（`F4-01` 那个阶段目标的用法）。"
+               "多做一级不是错答，是**多花几小时**，而且用户没有办法从报告里看出来"
+               "它做了他没要的那一级",
+    },
+    {
+        "id": "f4-04",
+        "label": "扫描器开不起来时甩栈（不再当配置错误）",
+        "file": "src/localsearch/cli/commands/index.py",
+        "old": "    try:\n        return make_scanner(scan_config)\n    except ScanError as exc:\n        typer.secho(f\"无法开始：{exc}\", fg=\"red\", err=True)\n        raise typer.Exit(EXIT_USAGE) from exc",
+        "new": "    return make_scanner(scan_config)",
+        "tests": ["tests/unit/test_cli_index_dryrun.py"],
+        "expect": "test_a_refused_config_error_leaves_no_trace",
+        "why": "⚠ 这是**真实发生过**的回归：`F4-04` 把 `make_scanner()` 从 `_dry_run()` "
+               "里拉出来时漏了这道 `except`，`lsearch index --all-drives` 甩一屏 "
+               "traceback、退出码 1——而退出码 1 在计划 §4.8 里的意思是'跑完了但有文件"
+               "没成'，脚本会去重试一件永远不成的事",
+    },
+    {
+        "id": "f4-04",
+        "label": "`search` 不先看库在不在",
+        "file": "src/localsearch/cli/commands/search.py",
+        "old": "    if not db_path.exists():",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_a_missing_database_is_refused_and_leaves_no_trace",
+        "why": "`sqlite3.connect()` **会建文件**：用户得到的是'什么都没搜到'加一个刚被"
+               "创建出来的空库，而那个空库会让之后每一次命令都以为'索引已经建好了'"
+               "（连带 `data_dir` 也建出来了，`A7` 的落点）",
+    },
+    {
+        "id": "f4-04",
+        "label": "显式 `--mode semantic` 悄悄降级（不拒绝）",
+        "file": "src/localsearch/search/tier.py",
+        "old": "        if explicit:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_an_explicit_semantic_mode_is_refused",
+        "why": "判据是**这句话是不是人说的**：一个人明确要了语义检索，词法给他的是一堆"
+               "**看起来合理**的关键词命中，他没有任何办法察觉自己拿到的是另一种东西。"
+               "这是 `A8` 的极端形态——不是结果不完整，是结果答的是另一个问题",
+    },
+    {
+        "id": "f4-04",
+        "label": "`IMPLEMENTED_MODES` 声称三种都能跑",
+        "file": "src/localsearch/search/tier.py",
+        "old": 'IMPLEMENTED_MODES = frozenset({"lexical"})',
+        "new": 'IMPLEMENTED_MODES = frozenset({"lexical", "semantic", "hybrid"})',
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_the_config_default_hybrid_is_downgraded_with_a_note",
+        "why": "这一格一变，降级与拒绝**两条路一起消失**：默认配置不再降级（也就不再"
+               "标注「语义未就绪」），而 `--mode semantic` 不再被拒绝。终端上它看起来"
+               "完全正常——`检索模式 semantic`，只是结果全是关键词命中",
+    },
+    {
+        "id": "f4-04",
+        "label": "标注一条都不打印",
+        "file": "src/localsearch/cli/commands/search.py",
+        "old": "    for note in readiness.notes:",
+        "new": "    for note in ():",
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_a_tier0_only_index_still_answers_by_name_and_says_body_is_not_ready",
+        "why": "`search_chunks()` 在正文一片都没进库时返回空列表，而那与'跑完了、但这"
+               "个词没出现过'**在数据上完全一样**。那句话说出口的责任在这一层："
+               "少了它，用户看到的是'一条都没有'，他会去改查询",
+    },
+    {
+        "id": "f4-04",
+        "label": "`--limit` 不往下传给库",
+        "file": "src/localsearch/cli/commands/search.py",
+        "old": "        paths = store.search_paths(query, limit=top_k)",
+        "new": "        paths = store.search_paths(query)",
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_limit_caps_each_section",
+        "why": "`--limit 2` 给了、输出还是缺省那 20 条，而用户以为自己限住了。参数被"
+               "声明了却没人用，是这个项目反复点名的那一类错——它**看起来完全正常**",
+    },
+    {
+        "id": "f4-04",
+        "label": "整串标点的查询当成'没搜到'",
+        "file": "src/localsearch/cli/commands/search.py",
+        "old": "    if not paths.has_query:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_cli_search.py"],
+        "expect": "test_a_query_with_no_searchable_token_says_so",
+        "why": "'这个查询里没有可以搜的词'与'没搜到'的下一步完全不同：前者要用户改查询，"
+               "后者要他改索引。只回两个空列表的话，用户会以为工具丢了他的查询",
+    },
+    {
+        "id": "f4-04",
+        "label": "自相矛盾的参数组合不再拦",
+        "file": "src/localsearch/cli/commands/index.py",
+        "old": "    if dry_run and resume:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_self_contradicting_flags_are_refused_before_touching_anything",
+        "why": "`--dry-run --resume` 走到 dry-run 那一支、报出一份看着完整的分桶报表，"
+               "退出码 0——而用户要的'接着上一轮跑完'一个字都没做。这类组合与磁盘状态"
+               "无关，等跑了半小时才发现是最没有必要的浪费",
+    },
 ]
 
 

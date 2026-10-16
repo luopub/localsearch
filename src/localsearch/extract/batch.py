@@ -118,6 +118,7 @@ __all__ = [
     "Outcome",
     "Tally",
     "extract_many",
+    "one_line",
 ]
 
 #: 写进 `files.status` 的三个值（取值域见计划 §4.3 的 `files.status`）。三个常量而不是
@@ -135,8 +136,13 @@ ERROR_MSG_MAX = 200
 _ELLIPSIS = "..."
 
 
-def _one_line(text: str) -> str:
-    """折成一行、去掉首尾空白、截到 `ERROR_MSG_MAX`（超了在尾巴上留 `...`）。"""
+def one_line(text: str) -> str:
+    r"""折成一行、去掉首尾空白、截到 `ERROR_MSG_MAX`（超了在尾巴上留 `...`）。
+
+    **公开的**（`F4-04` 起）：`files.error_msg` 的形态是这一个函数说了算，而写它的人
+    不止 `Outcome.error_msg` 一个——`index/build.py` 也有两条自己造原因的路（算哈希时
+    读不出来、`find_blob` / `put_blob` 的判断漂了）。让它们各写一份折行 + 截断，就会
+    出现"同一种消息两种形状"，而报表正是靠这个形状按类分堆的。"""
     flat = " ".join(text.split())
     if len(flat) <= ERROR_MSG_MAX:
         return flat
@@ -195,12 +201,12 @@ class Outcome:
         （这一类不做——理由见模块文档那一段，别在这里补上原因）。
         """
         if self.unexpected is not None:
-            return _one_line(
+            return one_line(
                 f"未预期的异常 {type(self.unexpected).__name__}: {self.unexpected}"
             )
         if self.error is None or isinstance(self.error, UnsupportedFormat):
             return ""
-        return _one_line(f"{type(self.error).__name__}: {self.error}")
+        return one_line(f"{type(self.error).__name__}: {self.error}")
 
 
 @dataclass(slots=True)
