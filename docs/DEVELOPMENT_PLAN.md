@@ -332,6 +332,8 @@ localsearch/
 │  ├─ index/
 │  │  ├─ schema.sql
 │  │  ├─ sqlite_store.py
+│  │  ├─ tokens.py            # FTS5 预分词与 MATCH 表达式（F4-01 落地时加进树里，见 §4.3 末注）
+│  │  ├─ build.py             # Tier0 / Tier1 那一趟的编排：批量、提交、断点续跑（F4-04）
 │  │  ├─ vectors_faiss.py
 │  │  ├─ vectors_hnswlib.py
 │  │  ├─ vector_cache.py       # 嵌入输入级缓存：text_hash + embed_ver → 复用向量
@@ -363,6 +365,7 @@ localsearch/
 > - `media_meta.py` **只做图片 EXIF，不做 ID3**（用户 2026-10-15 决定：v1 不加依赖）。音频标签要么引依赖、要么自己写解析，都不值；`.mp3` 一类在 v1 只进**文件名层**。见 `PROGRESS.md` §4 P3「遗留」第 2 条。
 > - **`extract/batch.py` 是 `F3-07` 时加进树里的**（2026-10-16）：原树里**没有**"按批提取"这一档，而 `A6`（单文件解析失败不中断整轮）**必须**有一处落点，`base.py` 那份文档串当时就把位置留给了 `F3-07`。它是提取层的**批处理形态**、不是更高一层：除了接住异常与计数什么都不做（不写库、不切片、不判 tier、不重试），`P4` 的索引循环直接用它。同一条还顺带定死了"结局 → `files.status`"的映射（`fulltext` / `skipped` / `error`）与 `files.error_msg` 的形态（一行、带异常类名、上限 200 字符）。见 `PROGRESS.md` §4 P3「偏差」第 22 条。
 > - **`tests/fixtures/` 落成"21 条样本 + 一份清单 + 一个生成器"**（`F3-06`，2026-10-16；**树里那一行注释随之改了，位置不变**）：原写的"每种格式一个最小样本"少了**每一类表示各一条损坏样本**这一半（`F3-06` 的交付就是"最小样本 + 损坏样本"，见 §5 的 P3 行）。落地形态是——每类表示**一条好样本 + 一条坏样本**（**15 好 + 6 坏**，按**表示**分组而不是按扩展名），唯一真相来源是 `tests/fixtures/MANIFEST.toml`，判据是 `tools/make_fixtures.py --check`（把每条重新造一遍、与盘上的字节**逐字节**比，报**缺文件 / 漂了 / 多出来**）。⚠ 这**同时兑现了 §10.4 第 2 条**（"不需要手工准备数据"）——fixtures 全在仓库里、且**字节可复跑**（生成器造得出来，不是只有那一份二进制）；`doctor` 那类"必须真环境才跑得动"的验证仍然只算脚本化实测。见 `PROGRESS.md` §4 P3「测试记录」`F3-06` 那一组与新增的 §3 `E36`（三个 OOXML 库把"现在"写在哪——它是"字节可复造"这条判据的地基）。
+> - **`index/tokens.py` 是 `F4-01` 时加进树里的**（2026-10-16）：原树里 `index/` 只有 `schema.sql` 与 `sqlite_store.py`，而**切法必须是两边共用的一份代码**——`FTS5` 的 `unicode61` 对中文一个汉字也不切（`M9`），索引侧要把 CJK 段切好再落库、查询侧要用**同一套**切法去拼 `MATCH`；抄两份迟早分岔，而分岔的症状是"某些词静默搜不到"。三个决定（索引侧 `cut_for_search` + 相邻汉字 2-gram、查询侧 `cut` + 丢单字、不做 OR 兜底）都是量出来的，读数见 `PROGRESS.md` §3 的 **E38**。`build.py` 是 `F4-04` 那一趟的落点，先写进树里。
 
 
 ### 4.4 数据库 schema
@@ -449,6 +452,11 @@ CREATE VIRTUAL TABLE files_fts USING fts5(
   tokenize = 'unicode61 remove_diacritics 2'
 );
 ```
+
+> ⚠ **2026-10-16 按 `F4-01` 落地改写两处**（其余逐字落地，唯一真相来源是 `src/localsearch/index/schema.sql`）：
+> - **`files.path` 上多了 `COLLATE NOCASE`**。原文写的是 `path TEXT NOT NULL UNIQUE`，而 NTFS 的路径比较**不分大小写**（`C:/Windows` 与 `c:/windows` 是同一个目录）。少了这一条，同一棵树用两种大小写的根扫进来会得到两行——"两行"不报错，只是让计数偏大、让 `--prune` 删不干净（`P6`）。加 NOCASE 之后 `files.path` 仍然**存原样大小写**（显示、报错、打开文件都靠它），只有"唯一"这一条按不分大小写判。⚠ SQLite 的 NOCASE 只折叠 ASCII A–Z，这一点是已知差异，记在 `PROGRESS.md` §4 P4「遗留」。
+> - **多了一条 `CREATE INDEX idx_files_tier ON files(tier, status);`**。原文那三条索引里 `idx_files_volume` 的前导列是 `volume`，而 Tier1 那一趟的选择条件是"`tier` 还没到目标 **且** `status` 还要做"——没有这条索引就是每趟全表扫 100 万行。
+> - 另：**PRAGMA 不进 `schema.sql`**（`journal_mode = WAL` 是连接级、设一次就落盘，混在脚本里会让"新建库"与"打开已有库"两条路径行为不同），它们落在 `sqlite_store._configure()`；`files.quick_sig` 在 `P4` **一律留 `NULL`**（填它要给 `ScanEntry` 加 `ctime_ns`，归 `F6-02`），两处都在 `schema.sql` 里写明了。
 
 #### 4.4.1 内容去重（D12）的落地细节
 
