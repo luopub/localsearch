@@ -257,8 +257,20 @@ def test_overlap_ratio_out_of_range(tmp_path: Path, value: str) -> None:
         load_config(path)
 
 
-def test_zero_workers_rejected(tmp_path: Path) -> None:
-    path = write_toml(tmp_path, MINIMAL + "[perf]\nworkers = 0\n")
+def test_zero_workers_means_auto(tmp_path: Path) -> None:
+    """`workers = 0` = **自动**（按内存算，`A2` 的口径，`F5-02` 起）。
+
+    下界从 1 改成 0 是这个配置项语义的改动：0 **不是**"一个都不开"（那是连就地跑都不
+    跑），而是"这台机器放得下几个就开几个"。所以这里断言的是**加载成功且读回 0**——
+    真正的结算在 `embed/batching.py`，它的算术归 `test_batching.py` 管。
+    """
+    cfg = load_config(write_toml(tmp_path, MINIMAL + "[perf]\nworkers = 0\n"))
+    assert cfg.perf.workers == 0
+
+
+def test_negative_workers_rejected(tmp_path: Path) -> None:
+    """负数才是写错了——它不是"更少的并行"，是一个没有意义的数。"""
+    path = write_toml(tmp_path, MINIMAL + "[perf]\nworkers = -1\n")
     with pytest.raises(ConfigError, match="workers"):
         load_config(path)
 

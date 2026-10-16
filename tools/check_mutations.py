@@ -1449,6 +1449,363 @@ MUTATIONS: list[dict[str, object]] = [
                "⚠ 这条要真权重（约 20 秒 / 3 GB），取不到时它自己 skip——那时这条变体"
                "会报「没红」，那不是假警报，是这台机器上确实没有护栏",
     },
+    {
+        "id": "f5-02",
+        "label": "`W` 不再留保留额（把「当时可用」全算进预算）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    usable = available - reserve",
+        "new": "    usable = available",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_budget_is_arithmetic",
+        "why": "`A2` 公式里那个「− 保留额」不是装饰：`E7` 记着本机可用内存两轮之间在 "
+               "4–8 GiB 之间波动，而 P0 实测过「内存池按可用内存生长」——把当时的可用"
+               "**全部**算进预算，等于把墙算到贴着墙，而墙会往后挪（`R1`：硬跑两次把"
+               "机器拖到无响应）",
+    },
+    {
+        "id": "f5-02",
+        "label": "整除的结果可以掉到 0（`MIN_WORKERS` 那层兜底拿掉）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    return max(MIN_WORKERS, usable // per_worker)",
+        "new": "    return usable // per_worker",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_budget_never_below_one",
+        "why": "算出 0 就是「一个都不跑」，而 Tier2 是**增强**不是前提（`D10` 分级就绪）"
+               "——把一次内存紧张变成一次静默的无所作为。注意短路顺序：`usable <= 0` "
+               "那条分支**挡不住**这一条（可用 3 GiB、保留 2 GiB、单 worker 4 GiB 时"
+               "整除得 0，走的是这一行），所以测试里专门有这一组输入",
+    },
+    {
+        "id": "f5-02",
+        "label": "除法改成四舍五入（宁可多开一个）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    return max(MIN_WORKERS, usable // per_worker)",
+        "new": "    return max(MIN_WORKERS, (usable + per_worker - 1) // per_worker)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_budget_is_arithmetic",
+        "why": "看着更「不浪费」：可用 5 GiB、保留 2 GiB、单 worker 2 GiB 时它开 2 个，"
+               "而 3 ÷ 2 的分母摆在那里——多出来的那一个 worker 是拿「差一点放不下」"
+               "换来的。这条变体就是那个 (5,2,2,1) 输入存在的理由",
+    },
+    {
+        "id": "f5-02",
+        "label": "`per_worker` 的守卫只挡 0",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    if per_worker <= 0:",
+        "new": "    if per_worker == 0:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_budget_rejects_nonpositive_per_worker",
+        "why": "负数会走进整除：Python 的 `//` 对负数是**向下**取整，于是「放不下」会被"
+               "算成一个 1（或者一个荒谬的大数），而两种都不该被兜底成一个看起来正常的 W",
+    },
+    {
+        "id": "f5-02",
+        "label": "负的 `requested` 放过去（当成自动）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    if requested < 0:",
+        "new": "    if requested < -1:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_negative_request_is_rejected",
+        "why": "配置层已经拦过一道（`_INT_MIN`），这里再拦一次是因为这个函数的调用方"
+               "不止配置那一条路。‑1 个 worker 不是「更少的并行」，是一个没有意义的数",
+    },
+    {
+        "id": "f5-02",
+        "label": "忽略注入的可用内存，一律读本机",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    available = available_bytes() if available is None else available",
+        "new": "    available = available_bytes()",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_auto_explains_its_arithmetic",
+        "why": "四个输入可注入不是「好写测试」的便利，是**必须**：本机可用内存随浏览器"
+               "开开关关而变（`E7`），不可注入就等于拿一台随机机器当测试环境。这条变体"
+               "把注入堵死，于是所有算术测试一起红——它证明那些断言真的在拿注入值算",
+    },
+    {
+        "id": "f5-02",
+        "label": "自动模式不再按内存算，写死 1",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        workers = budget\n        notes.append(",
+        "new": "        workers = 1\n        notes.append(",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_auto_explains_its_arithmetic",
+        "why": "`workers = 0` 的语义是「这台机器放得下几个就开几个」（`A2` 重定口径时"
+               "明确的「不按核数取」）。写死 1 在本机**看起来一样**（本机就是 1）——"
+               "这正是那种只在一部分机器上错的写法，而 note 里的算式会跟着一起错",
+    },
+    {
+        "id": "f5-02",
+        "label": "被内存夹住时静默（不写 note）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        if workers < requested:\n            notes.append(",
+        "new": "        if False:\n            notes.append(",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_explicit_request_is_clamped_and_says_so",
+        "why": "夹住（clamp）而不拒绝是一个判断（只改变快慢、不改变结果），但这个判断"
+               "成立的**前提是要说出来**：用户写了 4、实际跑 1，不说就是「配置没生效"
+               "却毫无提示」——与 `--tier 2` 被压低一级时那条规矩同一个道理",
+    },
+    {
+        "id": "f5-02",
+        "label": "夹住时不夹，照用户写的开",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        workers = min(requested, budget)",
+        "new": "        workers = requested",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_explicit_request_is_clamped_and_says_so",
+        "why": "内存这边是硬顶（`A2`：硬顶是内存不是核数）。照用户写的开就是「按配置"
+               "把机器开爆」，而失败形态不是报错，是机器变慢或者进程被内存压力打掉",
+    },
+    {
+        "id": "f5-02",
+        "label": "总线程数超过核数时不提醒",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    if threads > 1 and workers * threads > cores:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_threads_oversubscription_is_noted_but_not_changed",
+        "why": "`[embed] threads` 与 `[perf] workers` 是**相乘**的（两个配置项的注释里"
+               "都写着），超订之后多出来的线程大概率是负收益。这里只提醒不替用户改"
+               "（`threads` 不在 `embed_ver` 里，但「多少个线程最快」是 `M4` 量出来的）",
+    },
+    {
+        "id": "f5-02",
+        "label": "`MIN_WORKERS` 抬到 2",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "MIN_WORKERS = 1",
+        "new": "MIN_WORKERS = 2",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_budget_never_below_one",
+        "why": "「一个都放不下」的底线是**就地跑一个**，不是两个：把底线抬到 2 就等于"
+               "在放不下的机器上照开两个（`A2` 的算术结果，本机就是这种情况）",
+    },
+    {
+        "id": "f5-02",
+        "label": "`iter_requests` 丢掉调用方给的起始序号",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        yield BatchRequest(index=start + ordinal, texts=tuple(batch), titles=picked)",
+        "new": "        yield BatchRequest(index=ordinal, texts=tuple(batch), titles=picked)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_iter_requests_honours_start",
+        "why": "序号唯一的作用是让并行算出来的结果**归位**（`F5-04` 按它写回切片）。"
+               "第二段索引从 0 重来，症状是后一段的向量**覆盖**前一段的位置，"
+               "而每一批的向量本身都完全正确",
+    },
+    {
+        "id": "f5-02",
+        "label": "标题不跟着切片走（每批都从第一条取）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "            else tuple(title_list[ordinal * size : ordinal * size + len(batch)])",
+        "new": "            else tuple(title_list[: len(batch)])",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_iter_requests_titles_follow_the_slice",
+        "why": "标题进的是文档前缀（`F5-01`），所以错位之后**向量会变**、而长度与形状"
+               "全都正常：每条文本带上了**别人**的标题，搜出来看着还挺像那么回事",
+    },
+    {
+        "id": "f5-02",
+        "label": "`BatchRequest` 不再查 `titles` 与 `texts` 等长",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        if self.titles is not None and len(self.titles) != len(self.texts):",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_batch_request_rejects_mismatched_titles",
+        "why": "等长的检查必须在**构造**时做：放进 `encode_documents` 的话，一路走到"
+               "子进程里才报错，那时错的是一个已经被 pickling 过一次的批——而这一层"
+               "的整个意义就是「错的东西构造不出来」",
+    },
+    {
+        "id": "f5-02",
+        "label": "worker 每算一批就重建一次嵌入器",
+        "file": "src/localsearch/embed/batching.py",
+        "old": '    embedder = _WORKER_STATE.get("embedder")\n    if embedder is None:',
+        "new": "    embedder = None\n    if embedder is None:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_each_worker_builds_the_embedder_once",
+        "why": "「一个进程一个模型」不是优化：每个 worker 的常驻内存**就是**那份模型"
+               "（`E41`：7.17 GiB），而本机放不下的正是它；加上每次重建的冷启动"
+               "（`E40`：0.5–3.6 秒），批越小亏得越多",
+    },
+    {
+        "id": "f5-02",
+        "label": "子进程报父进程的 pid",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        vectors=vectors,\n        worker_pid=os.getpid(),",
+        "new": "        vectors=vectors,\n        worker_pid=0,",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_two_workers_use_two_processes",
+        "why": "`worker_pid` 是这一层唯一「证明结果真的来自另一个进程」的东西——"
+               "它错了，测试就没法区分「起了子进程」与「悄悄退回就地跑」，而后者在"
+               "本机（`W == 1`）是真的会发生的那条路",
+    },
+    {
+        "id": "f5-02",
+        "label": "子进程不再自报峰值内存",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        worker_pid=os.getpid(),\n        peak_bytes=peak_rss_bytes(),",
+        "new": "        worker_pid=os.getpid(),\n        peak_bytes=None,",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_two_workers_use_two_processes",
+        "why": "`PER_WORKER_RSS_BYTES` 是先验、会偏（`E41`：同一配置下 1.81 与 7.17 GiB "
+               "差四倍），自报峰值是唯一的**观测值**——它没了，先验就永远不会被回报修正",
+    },
+    {
+        "id": "f5-02",
+        "label": "就地跑时每批重建嵌入器",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "            if self._local is None:\n                self._local = self.factory(self.cfg)",
+        "new": "            if True:\n                self._local = self.factory(self.cfg)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_single_worker_builds_one_embedder_for_many_batches",
+        "why": "与子进程那条是**同一件事的两条路**（本机走的是这一条）：`W == 1` 不是"
+               "「凑合一下」，它要交的东西与子进程那条一模一样——一个进程一个模型",
+    },
+    {
+        "id": "f5-02",
+        "label": "`close()` 不放掉就地那个嵌入器",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        if self._local is not None:\n            self._local.close()\n"
+               "            self._local = None",
+        "new": "        if self._local is not None:\n            self._local = None",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_close_closes_the_local_embedder",
+        "why": "引用丢掉不等于放掉：那一份是 7 GiB 量级的常驻（`E41`），而 `close()` "
+               "存在的理由就是「一段算完就把模型放掉」（P0 的 `release_models()` 那一条）",
+    },
+    {
+        "id": "f5-02",
+        "label": "正常跑完就把池收摊（一趟一块，用完即废）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "                if not pending:\n                    return",
+        "new": "                if not pending:\n                    self.close()\n                    return",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_a_clean_run_leaves_the_pool_reusable",
+        "why": "一趟索引里会有好几段（`F5-04` 边算边写库、按段提交），每段都把模型重新"
+               "加载一遍等于把冷启动乘以段数（`E40`：0.5–3.6 秒/次）。**收摊只该发生在"
+               "出错与提前退出时**——那两种情形下留着子进程才是漏（它们在 Windows 上"
+               "会一直占着内存到解释器退出）",
+    },
+    {
+        "id": "f5-02",
+        "label": "出错时不再收摊（子进程留着）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        except BaseException:\n"
+               "            # 生成器被提前关掉（`GeneratorExit`）与任何异常都走这里：把进程池收掉，\n"
+               "            # 别留下一堆没人管的子进程（它们在 Windows 上会一直占着内存直到解释器退出）。\n"
+               "            self.close()\n"
+               "            raise",
+        "new": "        except BaseException:\n"
+               "            # 变体：出错时不再收摊\n"
+               "            raise",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_break_early_closes_the_pool",
+        "why": "调用方 `break`（或者 `GeneratorExit`）是最容易被忘掉的一条退出路径："
+               "异常路径人总会想起 `finally`，而「for 到一半不看了」不会——"
+               "留下的是一堆没人回收的子进程，每个都占着 7 GiB 量级",
+    },
+    {
+        "id": "f5-02",
+        "label": "退避只接 `MemoryError`，不接进程池被打死",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "_BACKOFF_ERRORS = (MemoryError, BrokenProcessPool)",
+        "new": "_BACKOFF_ERRORS = (MemoryError,)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_broken_process_pool_halves_workers_and_retries",
+        "why": "内存压力打掉一个 worker 时，父进程看到的是 `BrokenProcessPool` 而**不是**"
+               "`MemoryError`（P0 实测过 onnxruntime `EXIT=139`、没有 traceback）。只接"
+               "前者的退避等于在最需要它的那条路上不生效",
+    },
+    {
+        "id": "f5-02",
+        "label": "把 `EmbedUnavailable` 也算进退避（该停的时候接着算）",
+        "file": "src/localsearch/embed/batching.py",
+        # ⚠ 这里**不能**改 `_BACKOFF_ERRORS` 那一行去加 `EmbedUnavailable`：那个名字在
+        # `batching.py` 里**没有被导入**（只在文档串里出现过），加进去是 `NameError`，
+        # 整个模块导入不了、pytest 退出码 2——**收集期出错会被误判成"红了"**，而那
+        # 什么都验不到（2026-10-16 实测踩到，工具自己也拦了：它要求退出码必须是 1）。
+        # 改在 `except` 这一行，用**已经导入**的 `EmbedError`：`EmbedUnavailable` 是它的
+        # 子类，所以这条改动一样能把"该停的没停"复现出来。
+        "old": "                    except _BACKOFF_ERRORS as exc:",
+        "new": "                    except _BACKOFF_ERRORS + (EmbedError,) as exc:",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_unavailable_aborts_the_whole_run",
+        "why": "`EmbedUnavailable` 是**环境**问题（权重不在本机、快照缺件），`base.py` "
+               "的文档写着调用方应当**立刻停下整趟索引**。把它当退避处理，结果是"
+               "「权重不在」这件事被翻译成 `EmbedError`（连一个 worker 都放不下）——"
+               "一次环境错误变成一次内存诊断，而且两万个文件逐个再试一遍",
+    },
+    {
+        "id": "f5-02",
+        "label": "退避不减半",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "        self.workers = max(MIN_WORKERS, self.workers // 2)",
+        "new": "        self.workers = max(MIN_WORKERS, self.workers)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_memory_error_halves_workers_and_retries",
+        "why": "退避的全部内容就是「少开几个」：不减半的话重建出来的池与原来一模一样，"
+               "于是下一批大概率再撞一次同一堵墙——而 note 还在说「已经减半」",
+    },
+    {
+        "id": "f5-02",
+        "label": "退避时把这一批重投两遍（重复交付）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "                        retry.append(request)\n"
+               "                        self._shrink(exc)",
+        "new": "                        retry.extend([request, request])\n"
+               "                        self._shrink(exc)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_memory_error_halves_workers_and_retries",
+        "why": "「不会重复交付」是退避的硬约束（模块文档第三节）：结果只从 future 里取"
+               "出来一次就 `yield` 一次，重复交出去在 `F5-04` 那一侧就是同一批向量写两遍",
+    },
+    {
+        "id": "f5-02",
+        "label": "重投的批不再提交（丢掉）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "                for one in retry:\n                    pending[self._submit(one)] = one",
+        "new": "                for one in retry:\n                    pass",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_memory_error_halves_workers_and_retries",
+        "why": "退避的承诺是「减半，但这一批不会丢」。丢掉的话那一批的切片就永远没有"
+               "向量——`F5-04` 写库时表现为「少了一部分」，而整趟索引会报告成功",
+    },
+    {
+        "id": "f5-02",
+        "label": "子进程里不再把 `titles` 交给嵌入器",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "    vectors = embedder.encode_documents(request.texts, request.titles)",
+        "new": "    vectors = embedder.encode_documents(request.texts)",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_two_workers_use_two_processes",
+        "why": "`BatchRequest` 把标题一路带到子进程，就是为了这一行。丢了之后向量照样"
+               "是单位长度的、形状也对——只是每一条文档都按「无标题」算，"
+               "`F5-01` 那条前缀里唯一的文件名信息静默消失",
+    },
+    {
+        "id": "f5-02",
+        "label": "单 worker 的先验值被写小三位（`W` 于是开爆）",
+        "file": "src/localsearch/embed/batching.py",
+        "old": "PER_WORKER_RSS_BYTES = 7_700_000_000",
+        "new": "PER_WORKER_RSS_BYTES = 77_000_000",
+        "tests": ["tests/unit/test_batching.py"],
+        "expect": "test_prior_is_at_least_a_few_gib",
+        "why": "先验值准不准，测试断不出来（那是 `E41` 的读数，要复跑 "
+               "`tools/measure_worker_rss.py` 才知道）；能断的是**量级**。"
+               "而量级写错恰好是最坏的那一类：本机 `W` 从 1 变成 19，"
+               "而配置、日志、`notes` 里那个算式看起来全都正常——只有机器会出事",
+    },
+    {
+        "id": "f5-02",
+        "label": "`[perf] workers` 的下界又变回 1（0 不再当自动）",
+        "file": "src/localsearch/core/config.py",
+        "old": '    ("perf", "workers"): 0,',
+        "new": '    ("perf", "workers"): 1,',
+        "tests": ["tests/unit/test_config.py"],
+        "expect": "test_zero_workers_means_auto",
+        "why": "0（自动，按内存算）与 1（就地跑一个）在这个配置项里是**两件不同的事**。"
+               "下界回到 1 之后，`config/default.toml` 里那个 0 会被校验判成非法——"
+               "模板自己跑不起来，而这件事只在真正加载模板时才现形",
+    },
 ]
 
 

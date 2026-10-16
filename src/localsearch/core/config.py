@@ -108,7 +108,9 @@ class EmbedCfg:
     #: 嵌入用的 CPU 线程数。默认 8 = 本机**物理核**数（P0 的 E6：8 物理 / 16 逻辑）。
     #: 两个后端都用这个数（ST 走 `torch.set_num_threads`，ONNX 走 `intra_op_num_threads`）。
     #: ⚠ 它与 `[perf] workers`（进程数）是**相乘**的：4 个 worker × 8 线程 = 32 个线程
-    #: 抢 8 个物理核，A2 的并行加速会因此反过来变成减速。调 `[perf] workers` 时一起看。
+    #: 抢 8 个物理核，A2 的并行加速会因此反过来变成减速。`workers` 缺省是 0（自动，
+    #: 本机算出来 1），所以这里保持 8；真要开多个 worker 时一起往下调
+    #: （约 物理核 ÷ workers），`batching.py` 会在总线程数超过核数时提醒一句。
     threads: int = 8
 
 
@@ -145,11 +147,19 @@ class CliCfg:
 
 @dataclass(frozen=True)
 class PerfCfg:
-    # 计划 §4.5 的模板里写的是 8，那个数来自"cores//2"，而当时把 CPU 记成了 16 核。
-    # P0 实测（PROGRESS.md §3 的 E6）是 **8 物理核 / 16 逻辑核**，按物理核算
-    # min(8, 8//2) = 4。本机真正卡住并行的还不是核数而是内存（单 worker 2.01 GiB，
-    # 见 A2），所以 4 是"按核数算出来、还没被内存否掉"的起点，不是承诺值。
-    workers: int = 4
+    # 并行嵌入的**进程数**。0 = 自动：由 `embed/batching.py` 按内存算出来，公式是
+    # `A2` 重定后的口径 `W = ⌊(可用内存 − 保留额) ÷ 单 worker 实测 RSS⌋`。
+    #
+    # 这里原本写 4，来由是"cores//2"（计划 §4.5 的模板，而当时把 CPU 记成了 16 核）。
+    # P0 实测（PROGRESS.md §3 的 E6）是 **8 物理核 / 16 逻辑核**；而真正卡住并行的
+    # 不是核数而是**内存**：单 worker 峰值 RSS 2.01 GiB（`E8`），8 路要 16.09 GiB，
+    # 整机只有 15.37 GiB——`A2` 因此重定口径，并明确写了"**W 不按核数取**"。
+    #
+    # 所以现在写 0：按核数写死的那个 4 是一条**从没被内存检验过**的假设（F5-02 之前
+    # 没有任何代码读它），而"按这台机器算"才是这个配置项该有的语义。写一个正数仍然
+    # 可以，那是**上限**：实际取 min(你写的, 内存算出来的)，被夹住时会在日志与
+    # `EmbedPool.notes` 里说出来，不静默降级。
+    workers: int = 0
     commit_every_files: int = 500
 
 
@@ -218,7 +228,10 @@ _INT_MIN: dict[tuple[str, str], int] = {
     ("index", "hnsw_ef_search"): 1,
     ("search", "top_k"): 1,
     ("search", "rrf_k"): 1,
-    ("perf", "workers"): 1,
+    # workers 的下界从 1 改成 0（F5-02）：0 = **自动**（按内存算），负数才是写错了。
+    # 别的几个 0 是"不限 / 关闭"的意思（max_file_mb、email_attachment_depth），
+    # 这一个 0 是"你自己去算"——语义不同，所以它归 `embed/batching.py` 解释。
+    ("perf", "workers"): 0,
     ("perf", "commit_every_files"): 1,
 }
 
