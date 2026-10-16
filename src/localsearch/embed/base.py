@@ -454,6 +454,9 @@ class Embedder(Protocol):
     * 返回值一律是 `(n, dim)` 的 `float32`、L2 归一化过的（`postprocess_vectors` 保证）；
     * `encode_documents` 收一个 `title` 序列，是因为文档前缀里有标题槽（模块文档第二节）。
       `titles` 与 `texts` **等长**，逐条对应；不关心标题时传 `None`。
+    * **`document_input()` 是"这条文档实际喂给模型的字符"的唯一出口**（`F5-03` 起）。
+      谁要按"文本"做键——缓存（`index/vector_cache.py`）、对账、日志——就调它，**不要
+      自己拼前缀**：两处各拼一遍的失败形态是静默的，见那个方法的文档串。
     """
 
     #: 向量维度（= `[embed] dim`）。
@@ -463,6 +466,8 @@ class Embedder(Protocol):
 
     @property
     def embed_ver(self) -> str: ...
+
+    def document_input(self, text: str, title: str | None = None) -> str: ...
 
     def encode_queries(self, texts: Sequence[str]) -> np.ndarray: ...
 
@@ -513,6 +518,20 @@ class BatchEmbedder(ABC):
         "一个查询都没给"是调用方的事，不该在这一层炸）。"""
         return self._encode([self.prefixes.query + t for t in _as_texts(texts)])
 
+    def document_input(self, text: str, title: str | None = None) -> str:
+        r"""这条文档**实际喂给嵌入器的那串字符**：文档前缀 + 正文。
+
+        `F5-03` 加的。存在的理由是**它必须只有一处实现**：`encode_documents()` 用它拼
+        输入，`index/vector_cache.py` 用它算缓存键。两处各拼一遍的失败形态是**静默**的
+        ——算键那边少拼了前缀，于是"标题不同、正文相同"的两条文档撞成同一个键，第二条
+        复用第一条的向量，**标题就被悄悄丢掉了**：搜不到、不报错。
+
+        `title` 走 `TaskPrefixes.document_prefix()`，所以 `None`、空串、只有空白的
+        标题得到的是**同一串字符**（`title: none`）——也就是说它们共享一个缓存键，
+        这是对的：喂给模型的东西确实一模一样。
+        """
+        return self.prefixes.document_prefix(title) + text
+
     def encode_documents(
         self, texts: Sequence[str], titles: Sequence[str | None] | None = None
     ) -> np.ndarray:
@@ -529,8 +548,7 @@ class BatchEmbedder(ABC):
                     "而错位之后每一条文档都会带上**别人**的标题，搜出来看着还挺像那么回事。"
                 )
         prefixed = [
-            self.prefixes.document_prefix(t) + text
-            for t, text in zip(title_list, items)
+            self.document_input(text, title) for text, title in zip(items, title_list)
         ]
         return self._encode(prefixed)
 

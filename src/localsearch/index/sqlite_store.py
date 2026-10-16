@@ -86,6 +86,20 @@ r"""索引库的读写面（P4 / `F4-01` 与 `F4-02`）。测试落点 `tests/un
 见 `store_path()`：**反斜杠换正斜杠，大小写原样留着**。NTFS 的路径比较不分大小写，
 所以 `files.path` 上挂的是 `COLLATE NOCASE`（`schema.sql` 里那处刻意的差异）——
 两条只差大小写的路径会撞成一行，而**存下来的那一行是先到的那个写法**。
+
+------------------------------------------------------------------------------
+嵌入缓存那一层（`F5-03`）：本模块只供四条 SQL，**键怎么算不在这里**
+------------------------------------------------------------------------------
+
+`embed_cache` 那四条（`find_vectors()` / `put_vectors()` / `count_vectors()` /
+`delete_vectors()`）与 `F4-03` 的切法同源：**策略在 `index/vector_cache.py`，"执行"
+在这里**。所以本模块只管 `(text_hash, embed_ver) → vec_label` 这三列的读写，
+**不碰"text_hash 是怎么算出来的"**——那是 `vector_cache.text_hash()` 与
+`BatchEmbedder.document_input()` 的事，一处实现、一处理由。
+
+⚠ 这四条的 `embed_ver` **全是必填/无默认**的（`count_vectors()` 那个 `None` 只用于
+"总数"这一个报表用途）。理由是该表的主键是**两列**：只按 `text_hash` 查或删，
+"换了模型之后复用旧向量"与"清缓存顺手把别的版本也清了"就都成了**不报错**的操作。
 """
 
 from __future__ import annotations
@@ -180,6 +194,22 @@ _BLOB_ACTIONS = frozenset({BLOB_CREATED, BLOB_REUSED, BLOB_REPLACED})
 #: （这一类 v1 不做）故意不算：全盘上 `.db` / `.dat` / `.exe` 多得是，把"这一类不做"
 #: 也填上原因，失败报表就淹了（`extract/batch.py` 的模块文档定了这条分工）。
 _STATUS_WITH_ERROR = "error"
+
+#: 一条 `SELECT` 里最多塞多少个 `?`（`F5-03` 的 `find_vectors()` 用）。
+#:
+#: 上限是编译期的 `SQLITE_MAX_VARIABLE_NUMBER`，超了直接抛 `OperationalError`——
+#: 而"抛在哪一批"取决于批次大小，也就是"取决于内存"。**这个值是随 SQLite 的编译
+#: 选项变的**：老版本默认 **999**，本机 sqlite 3.50.4 实测是 **32766**（`E42`：
+#: 32766 个 `?` 通过、32767 抛 `too many SQL variables`）。所以这里不能拿"本机的
+#: 读数"当常量用，也不能贴着 999 写——取 900，两个数都安全，代价只是每 900 条多一条
+#: 查询。（本方法每一条 `SELECT` 还各多带一个 `embed_ver` 参数，留余量也是为它。）
+_SQL_PARAM_LIMIT = 900
+
+
+def _chunked(items: Sequence[str], size: int) -> Iterator[Sequence[str]]:
+    """把一段序列切成每段最多 `size` 个。`find_vectors()` 的 `IN (…)` 要靠它。"""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 class StoreError(Exception):
@@ -1047,6 +1077,118 @@ class SqliteStore:
         deleted = cur.rowcount
         self._conn.execute("DELETE FROM chunks WHERE blob_id = ?", (blob_id,))
         return int(deleted)
+
+    # -------------------------------------------------- 嵌入缓存那一层（F5-03）
+
+    def find_vectors(
+        self, text_hashes: Sequence[str], *, embed_ver: str
+    ) -> dict[str, int]:
+        r"""这批文本里，哪些**已经有向量了**。只读，什么都不改。
+
+        返回 `{text_hash: vec_label}`，只含命中的那些键。**`embed_ver` 是必填的**，
+        理由与 `find_blob()` 那条一样：键是 `(text_hash, embed_ver)` 两列，少了版本
+        这一半，"换了模型之后复用旧向量"就成了一条不报错的路径——而它的症状是"换过
+        模型的文件里，有些切片按旧模型的语义参与排序"，看起来一切正常。
+
+        ⚠ **分块查**：SQLite 的 `?` 参数上限是编译期的 `SQLITE_MAX_VARIABLE_NUMBER`
+        （老版本 999、本机 3.50.4 实测 32766，见 `_SQL_PARAM_LIMIT` 上的那段），而这个
+        方法的入参长度由调用方的批次决定。一次 `IN (…)` 塞两万个 `?` 不会报错得很难看
+        ——它会**直接抛** `sqlite3.OperationalError`，把整趟索引打断在第一批上。
+        所以这里按 `_SQL_PARAM_LIMIT` 切段，一段一条 `SELECT`，**每段的结果都要合并
+        回来**（少了合并的症状是"一部分键每趟都报没有、于是每趟重嵌"）。
+
+        ⚠ 命中的 label **不保证还有效**：`vec_label` 指的是 HNSW 里的 id，而 HNSW
+        被重建、或者某一版的 HNSW 文件丢了之后，库里这些行还在。用之前要确认那一版
+        的向量索引确实在（归 `F5-04` 的加载路径；本方法只如实回报"库里写了什么"）。
+        """
+        found: dict[str, int] = {}
+        if not text_hashes:
+            return found
+        for chunk in _chunked(text_hashes, _SQL_PARAM_LIMIT):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"SELECT text_hash, vec_label FROM embed_cache"
+                f" WHERE embed_ver = ? AND text_hash IN ({placeholders})",
+                (embed_ver, *chunk),
+            )
+            for text_hash, vec_label in rows:
+                found[str(text_hash)] = int(vec_label)
+        return found
+
+    def put_vectors(self, entries: Sequence[tuple[str, int]], *, embed_ver: str) -> int:
+        r"""把"这段文本的向量在 HNSW 里是哪个 id"记进 `embed_cache`。**不提交**。
+
+        返回**真正插进去的行数**（`INSERT OR IGNORE`）。
+
+        两条边界，方向不同：
+
+        * **同一次调用里出现重复的键：当场 `StoreError`。** 那不是竞态，是调用方的
+          去重没做——而"同一段文本有两个 label"正是本表要防的那件事（`D12`：同一段
+          文本只嵌一次）。`F5-03` 的 `CachePlan` 在算 todo 时就去重了，所以正常的
+          那条路永远碰不到它。这与 `put_chunks()` 拒绝重复调用同源。
+        * **库里已经有这个键（另一个进程/上一趟写下的）：忽略，不覆盖。** 两边存的
+          是同一条文本的两个向量副本，谁都不是错的；`INSERT OR REPLACE` 会让"先写
+          的"变成不可达（连带它指向的 label 变成只能靠 HNSW 自己引用的孤儿），而
+          `OR IGNORE` 至少让结果**确定**：先说的那一份说了算。返回值因此有意义——
+          返回值比入参少，就说明有别的写者。
+
+        `vec_label` 不许是负数的约定不在这一层判（`F5-04` 的 label 分配器说了算），
+        这里只要求它存在——`embed_cache.vec_label` 在 `schema.sql` 里是 `NOT NULL`。
+        """
+        if not embed_ver:
+            raise ValueError("embed_ver 不能为空——它是缓存键的一半")
+        seen: set[str] = set()
+        for text_hash, _label in entries:
+            if text_hash in seen:
+                raise StoreError(
+                    f"同一次 put_vectors() 里 text_hash {text_hash!r} 出现了两次。"
+                    "这不是竞态、是调用方的去重没做——同一段文本有两个 label 正是"
+                    "embed_cache 要防的那件事（D12）。先合并再去写。"
+                )
+            seen.add(text_hash)
+        written = 0
+        for text_hash, vec_label in entries:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO embed_cache (text_hash, embed_ver, vec_label)"
+                " VALUES (?, ?, ?)",
+                (text_hash, embed_ver, int(vec_label)),
+            )
+            written += cur.rowcount
+        return written
+
+    def count_vectors(self, *, embed_ver: str | None = None) -> int:
+        """`embed_cache` 里有多少条。给定 `embed_ver` 就只数那一版。
+
+        `embed_ver=None`（全数）是给报表用的——"库里到底攒了多少条缓存"要能回答，
+        但它**不是一个可以拿来当"有效"用的数**：不同版本的行互相不可用。
+        """
+        if embed_ver is None:
+            row = self._conn.execute("SELECT count(*) FROM embed_cache").fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT count(*) FROM embed_cache WHERE embed_ver = ?", (embed_ver,)
+            ).fetchone()
+        return int(row[0])
+
+    def delete_vectors(self, *, embed_ver: str) -> int:
+        r"""清掉某一版的全部缓存条目并返回条数。**不提交**。
+
+        `embed_ver` **没有默认值**是刻意的：这一版的 label 失效（换了模型、或者向量
+        索引要重建），别的版本那一堆行**一点问题都没有**。给个默认值就等于把"顺手清
+        个缓存"和"清掉所有版本"写成同一个调用——而后者的代价是下一次索引把整库
+        重嵌一遍（`A1` 的两万文件基准集上是数小时到一天）。
+
+        ⚠ 谁该调它：**重建向量索引的人**（`F5-04` / `F6` 的 `reindex`）。`vec_label`
+        是 HNSW 里的位置，索引重建之后旧的位置指向的不是旧的向量——**这一段必须与
+        建索引在同一个事务/同一个流程里**，否则中间崩一下就留下"缓存说有、索引里
+        没有"的窗口。本方法只提供那个动作，配平归调用方。
+        """
+        if not embed_ver:
+            raise ValueError("embed_ver 不能为空——清缓存清的是某一版，不是'所有'")
+        cur = self._conn.execute(
+            "DELETE FROM embed_cache WHERE embed_ver = ?", (embed_ver,)
+        )
+        return int(cur.rowcount)
 
     # ------------------------------------------------------------------ 杂项
 

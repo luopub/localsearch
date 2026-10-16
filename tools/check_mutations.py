@@ -1806,6 +1806,229 @@ MUTATIONS: list[dict[str, object]] = [
                "下界回到 1 之后，`config/default.toml` 里那个 0 会被校验判成非法——"
                "模板自己跑不起来，而这件事只在真正加载模板时才现形",
     },
+    # ---------------------------------------------------------------- f5-03
+    #: `F5-03`（嵌入输入级缓存）这一组的共同点：**缓存错的那一刻是静默的**，而且两个
+    #: 方向都错得很安静——“该命中没命中”表现为白花一次嵌入（慢，但结果对），
+    #: “不该命中却命中”表现为**向量与文本对不上**（结果错，但看起来完全正常）。
+    #:
+    #: 所以下面每一条都点名一个“看起来没事”的形态：标题没进向量、换了模型复用旧向量、
+    #: 同一批里重复的文本嵌两遍、label 与切片错位、清缓存清错范围。这些没有一个会
+    #: 抛异常，它们只让搜索结果悄悄变差——这正是 `D12` 要防的那一类。
+    {
+        "id": "f5-03",
+        "label": "`document_input()` 不再拼文档前缀",
+        "file": "src/localsearch/embed/base.py",
+        "old": "        return self.prefixes.document_prefix(title) + text",
+        "new": "        return text",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_key_goes_through_document_input",
+        "why": "这一行是 `encode_documents()` 与缓存键**唯一**的公共出口（`F5-03` 就是"
+               "为了它才把拼接从 `encode_documents()` 里提出来）。它一断，模型看到的"
+               "就是光秃秃的正文：标题不进向量、任务前缀也不进——**索引照建、搜索照出"
+               "结果**，只是文档侧与查询侧不再对着同一份词表，召回静默下降（`M3`）",
+    },
+    {
+        "id": "f5-03",
+        "label": "缓存键按切片正文算（丢掉标题）",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "    return text_hash(embedder.document_input(text, title))",
+        "new": "    return text_hash(text)",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_title_is_inside_the_key",
+        "why": "本模块文档第一节那条：**键必须等于模型看到的那串字符**。按正文算键之后，"
+               "「标题不同、正文相同」的两条文档撞成一个键，第二条复用第一条的向量"
+               "——**标题就被悄悄丢掉了**：搜不到、不报错，而且库里那条缓存看着完全正常",
+    },
+    {
+        "id": "f5-03",
+        "label": "算键之前先压空白（做了规范化）",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": '    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=_DIGEST_BYTES)',
+        "new": '    text = " ".join(text.split())\n'
+               '    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=_DIGEST_BYTES)',
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_hash_does_not_normalize_line_endings_or_unicode",
+        "why": "「顺手规范化一下」看着无害，方向却是错的：键不再是“模型看到的那串字符”，"
+               "而 CRLF 与 LF、NFC 与 NFD 这些**模型看来不同**的输入被折叠成同一个键。"
+               "不规范化的代价只是多嵌一次（安全方向），规范化之后的代价是复用了一个"
+               "别的文本的向量",
+    },
+    {
+        "id": "f5-03",
+        "label": "同一批里重复的键不去重",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        if key in seen:\n            continue",
+        "new": "        if False:\n            continue",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_plan_dedupes_within_the_run",
+        "why": "去重不只是省一次嵌入：重复的键会拿到**两个 label**，而 `embed_cache` 只"
+               "留得下一组（后写的被 `OR IGNORE` 挡掉）——于是 `plan` 记的那组与库里存的"
+               "那组从此对不上，同一条文本在 HNSW 里有两份向量，指向它的切片各说各话",
+    },
+    {
+        "id": "f5-03",
+        "label": "命中的键也进 `todo`（缓存等于没有）",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "            hits[key] = int(found[key])\n            continue",
+        "new": "            hits[key] = int(found[key])\n            todo.append(key)\n            continue",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_plan_all_hit",
+        "why": "这是“该命中没命中”那一半：每一趟都重嵌全库，而**报表上缓存是有的**"
+               "（`hits` 非空、`count()` 也在涨）。`A9`「同一份内容只嵌一次」就此作废，"
+               "代价是 `A1` 基准集上数小时到一天，而且没有任何一行日志看得出来",
+    },
+    {
+        "id": "f5-03",
+        "label": "`record()` 不再校验 label 与 todo 等长",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        if len(labels) != len(self.todo):",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_record_rejects_length_mismatch",
+        "why": "错位的后果是**每一条切片挂上别人的向量**：搜得到、顺序不对，谁都不会"
+               "怀疑。`zip()` 会安静地截断到较短的那一列，于是连“少了一半”这种形态"
+               "都不报错",
+    },
+    {
+        "id": "f5-03",
+        "label": "`record()` 不再拦重复调用",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        if self._done:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_record_rejects_being_called_twice",
+        "why": "第二次录会把同一批键指到两组不同的 label 上，而 `embed_cache` 里只留得下"
+               "第一组（`OR IGNORE`）——那之后 `labels_in_order()` 给的是第二组、库里"
+               "存的是第一组，两边都不报错",
+    },
+    {
+        "id": "f5-03",
+        "label": "`labels_in_order()` 不按输入顺序（改成按键排序）",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        for key in self.keys:",
+        "new": "        for key in sorted(self.keys):",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_plan_mixed_and_keeps_input_order",
+        "why": "这一列直接写进 `chunks.vec_label`，**顺序就是身份**。排序之后每一条切片"
+               "拿到的仍是“某个真实存在的向量”，长度也对、类型也对——只是换了别人。"
+               "与 `test_plan_dedupes_within_the_run` 那条合起来，顺序与重复各有一道",
+    },
+    {
+        "id": "f5-03",
+        "label": "`labels_in_order()` 不再拦“还没录完”",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        if not self.recorded:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_labels_in_order_refuses_before_record",
+        "why": "不拦的话这里会因为 `label_for()` 返回 `None` 而走到那条 `pragma: no cover`"
+               "分支——也就是说**它本来就没有别的地方接得住**：要么当场出声，要么把"
+               "`None` 一路写进 `chunks.vec_label`（NOT NULL，那时报的是一句看不出"
+               "所以然的完整性错误，离现场很远了）",
+    },
+    {
+        "id": "f5-03",
+        "label": "`VectorCache` 不再拦空 `embed_ver`",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        if not self.embed_ver:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_cache_refuses_an_empty_version",
+        "why": "空版本是“换了模型却察觉不到”的入口：同一串文本在空版本与真版本下是两组"
+               "互不可见的键。不拦的话调用方拿到的是一个**永远命不中**的缓存（每趟全库"
+               "重嵌），或者更坏——两处各写了不同的版本，查 A 写 B",
+    },
+    {
+        "id": "f5-03",
+        "label": "`VectorCache.record()` 只记在内存里、不写库",
+        "file": "src/localsearch/index/vector_cache.py",
+        "old": "        return self.store.put_vectors(\n"
+               "            [(key, plan.fresh[key]) for key in plan.todo], embed_ver=self.embed_ver\n"
+               "        )",
+        "new": "        return 0",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_cache_round_trip",
+        "why": "这一趟跑着看是对的（`plan` 里全有，label 表也对），**下一趟全部落空**"
+               "——缓存一条都没落地。它是最容易被误认成“没生效”的那一类：没有任何异常，"
+               "只有“怎么又嵌了一遍”",
+    },
+    {
+        "id": "f5-03",
+        "label": "`find_vectors()` 丢掉 `embed_ver` 条件",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '                f" WHERE embed_ver = ? AND text_hash IN ({placeholders})",\n'
+               "                (embed_ver, *chunk),",
+        "new": '                f" WHERE text_hash IN ({placeholders})",\n'
+               "                (*chunk,),",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_find_vectors_is_scoped_to_the_version",
+        "why": "键是**两列**：`(text_hash, embed_ver)`。少了版本这一半，换了模型之后同一"
+               "串文本会命中旧模型的 label 并复用它的向量——而 `embed_ver` 在别处都是"
+               "对的，只有这一条查询看不见它（计划 §4.4.1 记的那条实践者踩过的坑）",
+    },
+    {
+        "id": "f5-03",
+        "label": "分块大小贴着本机读数写大（10 万）",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "_SQL_PARAM_LIMIT = 900",
+        "new": "_SQL_PARAM_LIMIT = 100_000",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_chunked_keeps_every_key_and_bounds_each_chunk",
+        "why": "本机 sqlite 3.50.4 的上限是 32766（`E42`），**老版本是 999**——这个数是"
+               "编译期决定的。按本机读数写大之后，本机跑得通，换个 Python 发行版就是"
+               "`too many SQL variables` 把整趟索引打断在第一批上（那时错误指向的是"
+               "查询，不是一个写错的常量）",
+    },
+    {
+        "id": "f5-03",
+        "label": "`count_vectors()` 不再按版本筛",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        if embed_ver is None:",
+        "new": "        if True:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_count_vectors_by_version_and_total",
+        "why": "这个数会进 `doctor` / `status` 的报表，是“这一版缓存有多大”的唯一出处。"
+               "混进别的版本之后，报表上缓存看着有几百万条，而实际上**这一版能用的一条"
+               "都没有**——下一步（`F5-04` 判断“要不要重嵌”）就会被它带偏",
+    },
+    {
+        "id": "f5-03",
+        "label": "`delete_vectors()` 不按版本删",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '            "DELETE FROM embed_cache WHERE embed_ver = ?", (embed_ver,)',
+        "new": '            "DELETE FROM embed_cache", ()',
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_delete_vectors_only_touches_one_version",
+        "why": "「顺手清个缓存」与「清掉所有版本」被写成同一个调用，而代价不对称："
+               "缓存是**可重建**的，重建它要按 `A1` 的两万文件基准集嵌一遍（数小时到"
+               "一天）。而这次调用本身看起来完全正常——它就删了一堆行",
+    },
+    {
+        "id": "f5-03",
+        "label": "`put_vectors()` 改成 `INSERT OR REPLACE`",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '                "INSERT OR IGNORE INTO embed_cache (text_hash, embed_ver, vec_label)"',
+        "new": '                "INSERT OR REPLACE INTO embed_cache (text_hash, embed_ver, vec_label)"',
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_put_vectors_does_not_overwrite_an_existing_key",
+        "why": "两边存的其实是**同一条文本的两个向量副本**（两个进程各自嵌过），谁都"
+               "不是错的，所以结果必须是确定的那个——`OR IGNORE`（先写的说了算）。"
+               "`OR REPLACE` 让先写的那一行不可达，连带它指向的 label 变成只能靠 HNSW "
+               "自己引用的孤儿，而且每跑一趟换一个赢家",
+    },
+    {
+        "id": "f5-03",
+        "label": "`put_vectors()` 不再拦同一次调用里的重复键",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "            if text_hash in seen:",
+        "new": "            if False:",
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_put_vectors_rejects_duplicate_keys_in_one_call",
+        "why": "「同一段文本有两个 label」正是 `embed_cache` 这张表要防的那件事（`D12`），"
+               "而它在这一层是**可判**的：同一次调用里出现两次不是竞态，是调用方的去重"
+               "没做。不拦就只剩 `OR IGNORE` 那一道（它挡得住覆盖，挡不住两个 label "
+               "都进了 HNSW）",
+    },
 ]
 
 
