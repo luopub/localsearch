@@ -431,6 +431,123 @@ MUTATIONS: list[dict[str, object]] = [
                "模块文档串，里面有 `⚠`，在 GBK 管道下退出码 1（2026-10-16 实测；"
                "`0dcb708` 当年只修了它的账目行，够不着 `--help`）",
     },
+    # ------------------------------------------------------------------ f4-01
+    # Tier0 那一层（`index/` 三个新文件）的九条。⚠ 其中一条改的是 **`schema.sql`**
+    # ——它是包数据、也是"那条刻意的差异"唯一的落点，SQL 里没有别的东西会喊。
+    {
+        "id": "f4-01",
+        "label": "文件名那一列不再加 2-gram",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "                tokenize(row.name, bigrams=FILES_BIGRAMS),",
+        "new": "                tokenize(row.name, bigrams=False),",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_search_reaches_across_a_word_seam",
+        "why": "`E38` 量出来的那一层：`财务报表` 在 `cut_for_search` 下给出 `财务` / "
+               "`报表` / `财务报表`，**没有 `务报`**（跨词缝），微召回 75.3% → 98.8% "
+               "全靠它。少了它不报错，只是搜「落在词缝上的两个字」时静默回 0 条——"
+               "所以这条测试是故意钉住「两种切法不许顺手统一」",
+    },
+    {
+        "id": "f4-01",
+        "label": "查询侧不再丢单字汉字",
+        "file": "src/localsearch/index/tokens.py",
+        "old": "    trimmed = [t for t in raw if not (len(t) == 1 and HAN.match(t))]",
+        "new": "    trimmed = raw",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_search_uses_and_between_the_words_of_a_long_query",
+        "why": "`E38` 里最值钱的一个数：丢单字让微召回 36.1% → 75.3%（叠上 2-gram 是 "
+               "58.4% → 98.8%）。AND 语义下一个 `的` 就掐死整条查询，而查询里带「的」"
+               "是中文用户的常态。丢了它同样不报错，只是「经常搜不到」",
+    },
+    {
+        "id": "f4-01",
+        "label": "token 不再加引号（FTS5 的保留字按语法解释）",
+        "file": "src/localsearch/index/tokens.py",
+        "old": "    return '\"' + token.replace('\"', '\"\"') + '\"'",
+        "new": "    return token",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_a_file_named_and_txt_is_searchable_by_its_own_name",
+        "why": "`and.txt` 里的 `and` 是 FTS5 的保留字，裸拼进 MATCH 表达式直接抛"
+               "`fts5: syntax error`。加引号是唯一**不用维护保留字名单**的做法"
+               "（黑名单早晚会漏，而且漏的那次只影响一个文件名的搜索）",
+    },
+    {
+        "id": "f4-01",
+        "label": "`keep_token` 不再滤掉纯标点",
+        "file": "src/localsearch/index/tokens.py",
+        "old": "    return bool(_HAS_WORD_CHAR.search(token))",
+        "new": "    return True",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_a_query_with_nothing_searchable_is_not_a_search",
+        "why": "标点自己也算 token 之后，「没有可搜的内容」与「搜了但没命中」就分不开了"
+               "——`!!!` 会拼出一个非空表达式，用户看到的是一句普通的「没找到」。"
+               "这一层替掉的是 `MATCH ''` 那条语法错，所以它必须**在拼表达式之前**生效",
+    },
+    {
+        "id": "f4-01",
+        "label": "`put_file` 不再看 `rowcount`（重复行也写 FTS）",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        if cur.rowcount == 0:\n            return False",
+        "new": "        if False:\n            return False",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_a_duplicate_does_not_add_a_second_fts_row",
+        "why": "这是本项目里少见的一处「靠**别人的**行为」：`INSERT OR IGNORE` 被忽略时 "
+               "`rowcount` 是 0。它变坏时**不报错**，只是 `files_fts` 里慢慢长出重复行"
+               "——`files` 表看上去完全正常，搜索时同一个文件出现好几遍",
+    },
+    {
+        "id": "f4-01",
+        "label": "`files.path` 不再 `NOCASE`",
+        "file": "src/localsearch/index/schema.sql",
+        "old": "TEXT NOT NULL COLLATE NOCASE UNIQUE",
+        "new": "TEXT NOT NULL UNIQUE",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_put_file_says_false_for_a_case_variant",
+        "why": "NTFS 的路径比较不分大小写（`C:/Windows` 与 `c:/windows` 是同一个目录），"
+               "两行只差大小写时的症状是计数偏大、同一个文件在结果里出现两遍、`--prune` "
+               "删不干净。⚠ 这是 `schema.sql` 与计划 §4.4 原文**唯一**一处刻意的差异，"
+               "撤销它等于把那处差异悄悄删掉——SQL 里没有任何东西会喊",
+    },
+    {
+        "id": "f4-01",
+        "label": "`volume` 不再统一成小写",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "        object.__setattr__(self, \"volume\", drive_of(self.path).lower())",
+        "new": "        object.__setattr__(self, \"volume\", drive_of(self.path))",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_volume_is_lowercased_whatever_the_scanner_said",
+        "why": "两个扫描后端给的写法不一样（scandir 从 `D:/work` 出发给 `D:`，MFT 按卷"
+               "枚举给 `d:`）。不统一的话 `count_files(volume=\"d:\")` 静默少算一半，"
+               "而「盘点少了一半」看上去只是一个偏小的数字，不会有人去查",
+    },
+    {
+        "id": "f4-01",
+        "label": "`store_path` 不再换正斜杠",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "    return str(path).replace(\"\\\\\", \"/\")",
+        "new": "    return str(path)",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_store_path_turns_backslashes_forward",
+        "why": "库里只存一种写法（正斜杠）是「同一条路径只有一个真相」的落点：两种写法"
+               "混进来时 `UNIQUE` 拦不住（`D:\\work\\x` 与 `D:/work/x` 是两个不同的"
+               "字符串），同一个文件就成了两行。⚠ `old` 那里是**四个**反斜杠——这一处"
+               "比的是 Python 源码里的字面量，不是路径本身",
+    },
+    {
+        "id": "f4-01",
+        "label": "文件名那一列不再加权",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": "NAME_WEIGHT = 4.0",
+        "new": "NAME_WEIGHT = 0.0",
+        "tests": ["tests/unit/test_store_files_fts.py"],
+        "expect": "test_a_hit_in_the_name_outranks_a_hit_only_in_the_directory",
+        "why": "**这条变体该写成什么形状是量出来的**（2026-10-16，同一个库、同一条查询、"
+               "只换 `bm25` 的列权重）：出厂 (4.0, 1.0) 两个文件是 -1.2978 / -0.7302"
+               "（叫这个名字的在前）；名字权重调 0 → -0.7302 / -0.6465，**顺序反过来**，"
+               "测试红；而把两列对调 (1.0, 4.0) → -1.2978 / -1.2907，**顺序没变**、"
+               "测试不红。所以这一组钉住的是「名字那一列有正权重」，**钉不住 4.0 这个"
+               "具体数**——「为什么是 4.0」至今没有护栏，记在 P4「遗留」里",
+    },
 ]
 
 
