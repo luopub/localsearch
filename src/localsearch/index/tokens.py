@@ -161,9 +161,11 @@ HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 #: 一个 token 至少要有一个"字"字符才留下。判据取 `\w`，与 `unicode61` 认定 token
 #: 字符的口径对齐（字母、数字、汉字都算），纯标点一律丢。
-#: ⚠ `_` **是** `\w`、但**不是** `unicode61` 的词内字符（它把 `_` 当分隔符），
-#: 所以 `my_var` 会先在库里被拆成 `my` + `var`。查询侧同样要过 `unicode61`，
-#: 一个 `my_var` 查询也会被拆成 `my` AND `var`——两边一致，因此不影响命中。
+#: ⚠ `my_var` 这种名字的机制是**实测**的，不是推的（2026-10-16）：`jieba` 自己就
+#: 把它切成 `my` / `_` / `var`（`cut` 与 `cut_for_search` 都是这三个），`_` 再被
+#: `keep_token` 丢掉，于是索引里是 `my` + `var` 两个 token。`unicode61` 同样不把 `_`
+#: 当词内字符，但那一层**走不到**——落库时 `_` 已经没了。查询侧走同一条路，两边一致，
+#: 命中的是隐式 AND（`my` 且 `var`），不要求相邻。
 _HAS_WORD_CHAR = re.compile(r"\w", re.UNICODE)
 
 

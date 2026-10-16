@@ -436,16 +436,20 @@ MUTATIONS: list[dict[str, object]] = [
     # ——它是包数据、也是"那条刻意的差异"唯一的落点，SQL 里没有别的东西会喊。
     {
         "id": "f4-01",
-        "label": "文件名那一列不再加 2-gram",
+        "label": "名/路径这一层不再加 2-gram",
         "file": "src/localsearch/index/sqlite_store.py",
-        "old": "                tokenize(row.name, bigrams=FILES_BIGRAMS),",
-        "new": "                tokenize(row.name, bigrams=False),",
+        "old": "FILES_BIGRAMS = True",
+        "new": "FILES_BIGRAMS = False",
         "tests": ["tests/unit/test_store_files_fts.py"],
         "expect": "test_search_reaches_across_a_word_seam",
         "why": "`E38` 量出来的那一层：`财务报表` 在 `cut_for_search` 下给出 `财务` / "
                "`报表` / `财务报表`，**没有 `务报`**（跨词缝），微召回 75.3% → 98.8% "
                "全靠它。少了它不报错，只是搜「落在词缝上的两个字」时静默回 0 条——"
-               "所以这条测试是故意钉住「两种切法不许顺手统一」",
+               "所以这条测试是故意钉住「两种切法不许顺手统一」。"
+               "⚠ **这一条的第一版只关掉了 `row.name` 那一列，它活下来了**"
+               "（9 条里 2 条没红，2026-10-16 实测）：端到端那条路上的查询命中的是 "
+               "`path_tok`，而路径**包含**文件名——同一份 token 存了两列，一列坏了"
+               "另一列替它兜住。所以这条改的是那个常量本身",
     },
     {
         "id": "f4-01",
@@ -465,11 +469,20 @@ MUTATIONS: list[dict[str, object]] = [
         "file": "src/localsearch/index/tokens.py",
         "old": "    return '\"' + token.replace('\"', '\"\"') + '\"'",
         "new": "    return token",
-        "tests": ["tests/unit/test_store_files_fts.py"],
-        "expect": "test_a_file_named_and_txt_is_searchable_by_its_own_name",
+        "tests": ["tests/unit/test_index_tokens.py"],
+        "expect": "test_every_token_is_quoted_even_when_it_looks_harmless",
         "why": "`and.txt` 里的 `and` 是 FTS5 的保留字，裸拼进 MATCH 表达式直接抛"
                "`fts5: syntax error`。加引号是唯一**不用维护保留字名单**的做法"
-               "（黑名单早晚会漏，而且漏的那次只影响一个文件名的搜索）",
+               "（黑名单早晚会漏，而且漏的那次只影响一个文件名的搜索）。"
+               "⚠ **点名的那条测试是补出来的**：这条变体的第一版点的就是 "
+               "`test_a_file_named_and_txt_is_searchable_by_its_own_name`，"
+               "**它没红**（2026-10-16 实测，pytest 退出码 1 但红的是另外两条断言 "
+               "`expr` 形状的测试）。原因是引号这一层的**行为**后果被前一层挡住了："
+               "`keep_token` 只放行 `\\w`（字母/数字/汉字/`_`），`*` `\"` `(` `)` 根本"
+               "走不到拼表达式那一步；而查询串在 `query_tokens` 里已经被小写，"
+               "`AND` 到了 FTS5 就是普通词。于是这一层今天靠**形状**守着，"
+               "补在 `tests/unit/test_index_tokens.py` 里——那是两层防线里靠内的"
+               "一层的正常状态，写在这里免得下次有人以为它多余",
     },
     {
         "id": "f4-01",
