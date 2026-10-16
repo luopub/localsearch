@@ -94,7 +94,22 @@ class EmbedCfg:
     dim: int = 768
     dtype: str = "float32"
     quantize: str = "int8"
-    batch_size: int = 16
+    #: 一次喂进模型的切片数。**8 是 P0 那两张扫表共同给出的最优**，不是随手定的：
+    #: ONNX int8 在批 8 是 553.0 tok/s / 常驻 2.64 GiB，批 16 是 442.8 tok/s / 4.88 GiB
+    #: （**更慢且多占 2.2 GiB**，批 32 到 6.11 GiB）；ST float32 在批 8 也比批 16 略快。
+    #: 计划 §4.5 的模板原本写 16，是按"一次多喂点更划算"的直觉写的——实测推翻了它，
+    #: 而本机真正卡住并行的是内存（A2：W < 2），所以这个数直接决定能开几个 worker。
+    batch_size: int = 8
+    #: 单条文本喂进模型的最长 token 数。模型自己的推荐上限是 2048；**必须显式设**，
+    #: 否则 sentence-transformers 读到的默认值是 1e36（它取的是模型顶层
+    #: `max_position_embeddings`，而这份 config 把它藏在 `text_config` 里），
+    #: 于是**永不截断**。见 embed/gemma_st.py 与 gemma_onnx.py 的模块文档。
+    max_seq: int = 2048
+    #: 嵌入用的 CPU 线程数。默认 8 = 本机**物理核**数（P0 的 E6：8 物理 / 16 逻辑）。
+    #: 两个后端都用这个数（ST 走 `torch.set_num_threads`，ONNX 走 `intra_op_num_threads`）。
+    #: ⚠ 它与 `[perf] workers`（进程数）是**相乘**的：4 个 worker × 8 线程 = 32 个线程
+    #: 抢 8 个物理核，A2 的并行加速会因此反过来变成减速。调 `[perf] workers` 时一起看。
+    threads: int = 8
 
 
 @dataclass(frozen=True)
@@ -196,6 +211,8 @@ _INT_MIN: dict[tuple[str, str], int] = {
     ("chunk", "target_tokens"): 1,
     ("chunk", "max_chunks_per_doc"): 1,
     ("embed", "batch_size"): 1,
+    ("embed", "max_seq"): 1,
+    ("embed", "threads"): 1,
     ("index", "hnsw_m"): 1,
     ("index", "hnsw_ef_construction"): 1,
     ("index", "hnsw_ef_search"): 1,

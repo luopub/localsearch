@@ -1220,6 +1220,235 @@ MUTATIONS: list[dict[str, object]] = [
                "退出码 0——而用户要的'接着上一轮跑完'一个字都没做。这类组合与磁盘状态"
                "无关，等跑了半小时才发现是最没有必要的浪费",
     },
+    # ---------------------------------------------------------------- f5-01
+    #: `F5-01`（嵌入器双后端）这一组的共同点：**每一处改坏都不报错**，只让向量变差、
+    #: 或让不该进索引的东西进索引。前缀、归一化、掩码池化、指纹这四处是本轮全部
+    #: 「静默失效」的落点，所以它们各有一条。
+    #:
+    #: ⚠ 这里**没有**「查询前缀与文档前缀必须逐字不同」那一条：实测它不可变体化。
+    #: 那处守卫的三条分支互相覆盖——两条前缀相同时，文档那条要么没有标题槽（被
+    #: 「标题槽恰好一次」拦下），要么有（被「查询前缀不许有标题槽」拦下）。去掉它，
+    #: `test_prefix_guards_reject` 照样全绿，也就是说**它现在没有护栏**：它保住的是
+    #: 报错消息指得准（「非对称被破坏」而不是「标题槽次数不对」），不是行为。记在
+    #: 这里而不是补一条测试，是因为要补就得先造出一个只有它拦得住的输入，而那样的
+    #: 输入不存在。
+    #:
+    #: ⚠ 同一天这个工具**抓到过我自己**：`sentence_embedding` 那条变体第一版只改了
+    #: 判据（`if _EMBEDDING_OUTPUT in names:` → `if _HIDDEN_OUTPUT in names:`）而没改
+    #: 返回的值，于是"两个输出都在"的图上行为**一模一样**——它照样报「没红」。那不是
+    #: 缺护栏，是我的变体没生效；把两行一起换掉才是真的反转优先级。这条记在这儿，是
+    #: 因为"改坏一处代码"这件事本身就有一个不生效的失败形态，而它长得与"没有护栏"
+    #: 完全一样（`--self-test` 那一条喂的就是这个东西）。
+    {
+        "id": "f5-01",
+        "label": "标题槽不再替换成真标题",
+        "file": "src/localsearch/embed/base.py",
+        "old": '        return self.document.replace(TITLE_NONE, f"title: {cleaned}")',
+        "new": "        return self.document",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_title_replaces_the_slot",
+        "why": "`title: none` 是**占位符**（`M3` 的 `title: {t} | text: {c}`），不是"
+               "「标题这一项的值叫 none」。不替换时索引照建、搜索照出结果、向量照样"
+               "是单位长度——只是**标题里的词一个都搜不到**，而文件名恰恰是 Tier0 "
+               "最依赖的那一列（`A8` 的分级就绪全指望着它）",
+    },
+    {
+        "id": "f5-01",
+        "label": "前缀不再要求以空白结尾",
+        "file": "src/localsearch/embed/base.py",
+        "old": '            if not text.endswith((" ", "\\n", "\\t")):',
+        "new": "            if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_prefix_guards_reject",
+        "why": "拼接是 `prefix + text`，中间不加分隔符（与 sentence-transformers 自己"
+               "一致）。前缀末尾少一个空格，`query:` 就与正文粘成一个 token——模型"
+               "照样吐出一个看着正常的向量，只是它算的是另一个词",
+    },
+    {
+        "id": "f5-01",
+        "label": "标题槽的出现次数不再是硬约束",
+        "file": "src/localsearch/embed/base.py",
+        "old": "        if found != 1:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_prefix_guards_reject",
+        "why": "0 次时 `document_prefix()` 无可替换，**有标题也永远按无标题处理**"
+               "（同上一条的症状）；2 次时不知道该换哪一个。两种都只在「换了份前缀"
+               "词表」时才会遇到，而那时最需要的就是当场出声",
+    },
+    {
+        "id": "f5-01",
+        "label": "指纹里不再收 `max_seq`",
+        "file": "src/localsearch/embed/base.py",
+        "old": '        f"|{cfg.max_seq}|{cfg.quantize}"',
+        "new": '        f"|{cfg.quantize}"',
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_embed_ver_changes_with_the_fingerprint",
+        "why": "`max_seq` 决定「多长以后的正文被丢掉」，所以同一个切片在 2048 与 512 "
+               "下是**两个不同的向量**。少了它，改截断长度不会让任何一行失效：库里"
+               "一半的向量按旧口径算、另一半按新口径算，而索引说它们都是新的（`A9`）",
+    },
+    {
+        "id": "f5-01",
+        "label": "指纹里混进 `backend`",
+        "file": "src/localsearch/embed/base.py",
+        "old": '        f"|{cfg.max_seq}|{cfg.quantize}"',
+        "new": '        f"|{cfg.max_seq}|{cfg.quantize}|{cfg.backend}"',
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_embed_ver_ignores_knobs_that_only_change_the_speed",
+        "why": "这是**反方向**的错：把后端放进指纹不会算错任何东西，代价是把「换个"
+               "跑得更快的实现」（`D9` 选 ONNX 的整个理由）变成一整趟全库重嵌——"
+               "`A1` 的两万文件基准集上是数小时到一天，而两条路的向量余弦实测 "
+               "0.999935（`test_embed_backends_agree` 钉着那个读数）",
+    },
+    {
+        "id": "f5-01",
+        "label": "零向量不再当场报错",
+        "file": "src/localsearch/embed/base.py",
+        "old": "    if not np.isfinite(norms).all() or float(norms.min(initial=np.inf)) < _ZERO_NORM_EPS:",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_postprocess_rejects_a_zero_row",
+        "why": "零向量除以自己的长度是 NaN，而 NaN 与任何查询的余弦都是 NaN——比较恒假，"
+               "那个切片**永远搜不到**，一句话都不会说。这条变体实测还有个二次教训："
+               "去掉这道守卫之后，下游的 `check_unit_norm` 也**接不住**（`nan > tol` "
+               "恒为假），所以它就是这一档的最后一道",
+    },
+    {
+        "id": "f5-01",
+        "label": "按 `dim` 截断后不再重新归一化",
+        "file": "src/localsearch/embed/base.py",
+        "old": "    vecs = l2_normalize(vecs, source=source)",
+        "new": "    vecs = vecs",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_postprocess_truncates_then_normalizes",
+        "why": "`D5` 的 MRL 截断取前 `dim` 列，向量长度随之小于 1。余弦仍然单调、排序"
+               "仍然「看着对」，而 `F5-04` 的 HNSW 用内积当余弦，前提正是单位长度"
+               "——那时错误表现为「近邻里混进一批远的」，没有任何异常",
+    },
+    {
+        "id": "f5-01",
+        "label": "传进来一整条字符串不再拦",
+        "file": "src/localsearch/embed/base.py",
+        "old": "    if isinstance(texts, str):",
+        "new": "    if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_a_bare_string_is_rejected",
+        "why": "`Sequence[str]` 对 `str` 说得通，于是遍历**逐字符**加前缀：一条查询变成"
+               "十几个单字查询，返回十几个向量。调用方拿到的形状完全合法，只是搜出来"
+               "的东西与用户输入的那句话无关",
+    },
+    {
+        "id": "f5-01",
+        "label": "`titles` 与 `texts` 不等长不再拦（zip 会静默截断）",
+        "file": "src/localsearch/embed/base.py",
+        "old": "            if len(title_list) != len(items):",
+        "new": "            if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_title_count_must_match",
+        "why": "两条是逐条对应的，`zip` 截短到短的那一边——每一条文档会带上**别人**的"
+               "标题（或者最后几条根本没标题），而向量、行数、索引全都正常。标题是"
+               "Tier0/Tier1 的主要召回来源，错位之后最像「这个文件的标题真不相关」",
+    },
+    {
+        "id": "f5-01",
+        "label": "后端返回的行数不对不再拦",
+        "file": "src/localsearch/embed/base.py",
+        "old": "            if len(raw) != len(batch):",
+        "new": "            if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_wrong_row_count_from_the_backend_is_caught",
+        "why": "少给几行时若按 `min(行数)` 对齐，**每一个切片都挂上别人的向量**——而它与"
+               "「索引建好了」长得一模一样。后端换一版导出、或者哪次 padding 出了岔子，"
+               "这就是默认的失败形态",
+    },
+    {
+        "id": "f5-01",
+        "label": "`close()` 之后继续算",
+        "file": "src/localsearch/embed/base.py",
+        "old": "        if self._closed:",
+        "new": "        if False:",
+        "tests": ["tests/unit/test_embed_base.py"],
+        "expect": "test_close_is_idempotent_and_stops_further_use",
+        "why": "`close()` 是 `F5-02` 多进程调度收尾时的动作（一个子进程一批文件，跑完"
+               "就关）。关掉之后继续用会**算出一堆零或直接崩**，而不是报一句「已经 "
+               "close 过了」——这正是「静默失效」的形态",
+    },
+    {
+        "id": "f5-01",
+        "label": "多模态槽的符号维当成 1（「一条带黑图的样本」）",
+        "file": "src/localsearch/embed/gemma_onnx.py",
+        "old": "        shape.append(dim if isinstance(dim, int) and dim >= 0 else 0)",
+        "new": "        shape.append(dim if isinstance(dim, int) and dim >= 0 else 1)",
+        "tests": ["tests/unit/test_embed_onnx.py"],
+        "expect": "test_empty_shapes_come_from_the_graph_not_from_a_constant",
+        "why": "`(0, 512)` 的空张量是在说「这条样本没有图」；`(1, 512)` 的零张量说的是"
+               "「这条样本带一张全黑的图」。**后者不报错**，模型照常算出一个看着正常的"
+               "向量——所以形状只能从图自己声明的元数据里算，一个数都不许写死",
+    },
+    {
+        "id": "f5-01",
+        "label": "两个输出都在时改成优先用 `last_hidden_state`",
+        "file": "src/localsearch/embed/gemma_onnx.py",
+        "old": "    if _EMBEDDING_OUTPUT in names:\n        return _EMBEDDING_OUTPUT",
+        "new": "    if _HIDDEN_OUTPUT in names:\n        return _HIDDEN_OUTPUT",
+        "tests": ["tests/unit/test_embed_onnx.py"],
+        "expect": "test_sentence_embedding_is_preferred",
+        "why": "图里那份池化是**模型作者实现的那一份**，我们自己 mean pool 只是「等价"
+               "实现」。换成自己池化不会报错，只是绕开了作者的池化层（这一类模型的"
+               "池化细节并不总是「对 mask 求平均」），而向量照样是单位长度",
+    },
+    {
+        "id": "f5-01",
+        "label": "自己池化时漏乘注意力掩码",
+        "file": "src/localsearch/embed/gemma_onnx.py",
+        "old": "    weights = mask[..., None].astype(np.float32)",
+        "new": "    weights = np.ones(mask.shape + (1,), dtype=np.float32)",
+        "tests": ["tests/unit/test_embed_onnx.py"],
+        "expect": "test_mean_pool_ignores_padding",
+        "why": "padding 位的 hidden state **不是 0**（是 pad token 过完模型的结果），"
+               "直接求平均就让向量随**批里最长的那条**变化：同一条文本与不同的邻居"
+               "拼批得到不同向量，而 `F5-03` 的缓存整个建立在「同一文本 → 同一向量」上",
+    },
+    {
+        "id": "f5-01",
+        "label": "`token_type_ids` 用真 id 而不是全 0",
+        "file": "src/localsearch/embed/gemma_onnx.py",
+        "old": "                feed[meta.name] = np.zeros_like(ids)",
+        "new": "                feed[meta.name] = ids",
+        "tests": ["tests/unit/test_embed_onnx.py"],
+        "expect": "test_token_type_ids_is_zero_filled_when_the_graph_wants_it",
+        "why": "这个模型不用句对，标准答案是全 0。填成真 id 之后语法上完全合法，模型也"
+               "多算不出错——只是把每条样本当成「两个句子」处理，向量静默变差",
+    },
+    {
+        "id": "f5-01",
+        "label": "交给 `encode()` 先归一化（截断之后就不是单位长度了）",
+        "file": "src/localsearch/embed/gemma_st.py",
+        "old": "            normalize_embeddings=False,",
+        "new": "            normalize_embeddings=True,",
+        "tests": ["tests/unit/test_embed_gemma_st.py"],
+        "expect": "test_normalization_is_left_to_the_base_class",
+        "why": "看着更「完整」的写法。归一化必须发生在按 `dim` 截断**之后**（`D5` 的 "
+               "MRL），先归一化再截断得到的向量长度小于 1——余弦照样算得出来，只是"
+               "尺度错了，而 HNSW 用内积当余弦的前提正是单位长度",
+    },
+    {
+        "id": "f5-01",
+        "label": "不再显式设 `max_seq_length`（读回 1e36）",
+        "file": "src/localsearch/embed/gemma_st.py",
+        "old": "    model.max_seq_length = cfg.max_seq",
+        "new": "    pass",
+        "tests": ["tests/unit/test_embed_gemma_st.py"],
+        "expect": "test_real_max_seq_length_is_not_1e36",
+        "why": "**这一条是 `F5-01` 那个意外发现的护栏**：这个模型的 `config.json` 把"
+               "上限（262144）藏在 `text_config` 里，顶层没有 `max_position_embeddings`，"
+               "于是 `SentenceTransformer` 读到的 `max_seq_length` 是 **1e36**——"
+               "**它永远不会自己截断**。不设的话超长切片被整条喂进模型：慢、吃内存，"
+               "而那一段的向量是把几十页正文混在一起的**平均**，语义上也没什么用。"
+               "⚠ 这条要真权重（约 20 秒 / 3 GB），取不到时它自己 skip——那时这条变体"
+               "会报「没红」，那不是假警报，是这台机器上确实没有护栏",
+    },
 ]
 
 

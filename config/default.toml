@@ -78,9 +78,19 @@ dim         = 768
 #   而本机是 Zen 2、没有 bf16 硬件，P0 实测 bfloat16 比 float32 慢 6.21 倍
 #   （71.4 对 442.9 tok/s），且**不报错、只是慢**。所以这里实际上只能是 float32。
 dtype       = "float32"
-# 向量落盘量化：none|int8
+# 向量落盘量化：none|int8。⚠ 它只管**存下去**的向量是哪种表示，与 ONNX 那张图本身是
+# int8 量化的无关（那是 D9 选型，写死在 embed/gemma_onnx.py 里）。
 quantize    = "int8"
-batch_size  = 16
+# 一次喂进模型几条切片：8 是 P0 两张扫表共同给出的最优（ONNX int8 批 8 = 553.0 tok/s /
+# 常驻 2.64 GiB，批 16 = 442.8 tok/s / 4.88 GiB，更慢且多占 2.2 GiB）。计划 §4.5 原本
+# 写 16，实测推翻。
+batch_size  = 8
+# 单条文本喂进模型的最长 token 数。模型推荐上限 2048。**不要省掉这一项**：默认值实际是
+# 1e36（模型把真值藏在 text_config 里，sentence-transformers 从顶层读不到），即永不截断。
+max_seq     = 2048
+# 嵌入用的 CPU 线程数，默认 = 本机物理核数（8）。⚠ 它与 [perf] workers 相乘：
+# 4 个 worker × 8 线程 = 32 线程抢 8 个核，会让并行加速变成减速（A2 卡在内存上也卡在核数）。
+threads     = 8
 
 
 [index]

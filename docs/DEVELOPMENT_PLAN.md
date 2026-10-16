@@ -328,6 +328,7 @@ localsearch/
 │  ├─ embed/
 │  │  ├─ base.py               # Embedder Protocol
 │  │  ├─ gemma_st.py
+│  │  ├─ gemma_onnx.py         # ONNX int8（D9 的生产后端；F5-01 落地时加进树里，见 §4.3 末注）
 │  │  └─ batching.py           # 批大小 / 多进程调度 / OOM 退避
 │  ├─ index/
 │  │  ├─ schema.sql
@@ -368,6 +369,7 @@ localsearch/
 > - **`tests/fixtures/` 落成"21 条样本 + 一份清单 + 一个生成器"**（`F3-06`，2026-10-16；**树里那一行注释随之改了，位置不变**）：原写的"每种格式一个最小样本"少了**每一类表示各一条损坏样本**这一半（`F3-06` 的交付就是"最小样本 + 损坏样本"，见 §5 的 P3 行）。落地形态是——每类表示**一条好样本 + 一条坏样本**（**15 好 + 6 坏**，按**表示**分组而不是按扩展名），唯一真相来源是 `tests/fixtures/MANIFEST.toml`，判据是 `tools/make_fixtures.py --check`（把每条重新造一遍、与盘上的字节**逐字节**比，报**缺文件 / 漂了 / 多出来**）。⚠ 这**同时兑现了 §10.4 第 2 条**（"不需要手工准备数据"）——fixtures 全在仓库里、且**字节可复跑**（生成器造得出来，不是只有那一份二进制）；`doctor` 那类"必须真环境才跑得动"的验证仍然只算脚本化实测。见 `PROGRESS.md` §4 P3「测试记录」`F3-06` 那一组与新增的 §3 `E36`（三个 OOXML 库把"现在"写在哪——它是"字节可复造"这条判据的地基）。
 > - **`index/tokens.py` 是 `F4-01` 时加进树里的**（2026-10-16）：原树里 `index/` 只有 `schema.sql` 与 `sqlite_store.py`，而**切法必须是两边共用的一份代码**——`FTS5` 的 `unicode61` 对中文一个汉字也不切（`M9`），索引侧要把 CJK 段切好再落库、查询侧要用**同一套**切法去拼 `MATCH`；抄两份迟早分岔，而分岔的症状是"某些词静默搜不到"。三个决定（索引侧 `cut_for_search` + 相邻汉字 2-gram、查询侧 `cut` + 丢单字、不做 OR 兜底）都是量出来的，读数见 `PROGRESS.md` §3 的 **E38**。`build.py` 是 `F4-04` 那一趟的落点，先写进树里。
 > - **`index/tier.py` 是 `F4-03` 时加进树里的**（2026-10-16）：原树只把"分级就绪"放在 `search/tier.py` 一格，落地时按**测试的形状**拆成两半——`index/tier.py` 管**状态**（`TIER_*` / `STATUSES` / `work_condition()` / `tier_counts()` 那一侧的台账，要读库或即将被库读；`STATUSES` 与 `MAX_TIER` 两个常量也从 `sqlite_store.py` 搬到这里，于是"库那一侧"只剩读写），`search/tier.py` 管**话**（拿一份台账与用户要的模式，决定能不能做、要说什么；**纯函数**，不该为了被测试而先建一个库）。⚠ 这一句是**补记**：这一格原本在 `F4-03` 落地时就该改，漏了，`F4-04` 的文档提交里补上（`PROGRESS.md` §4 P4「偏差」第 7 条与「遗留」第 17 条）。
+> - **`embed/gemma_onnx.py` 是 `F5-01` 时加进树里的**（2026-10-16）：原树在 `embed/` 下只有 `base.py` / `gemma_st.py` / `batching.py`，那是 `D9` 定下 ONNX int8 为生产后端**之前**画的——只留了 ST 一支。落地时补上 ONNX 那一支，并且**不带** `gemma_` 前缀之外的后缀：它不是"另一条备用路"，是 `D9` 选的**默认路**（冷启动 0.50 对 5.89 秒，`lsearch search` 这种一次性命令全靠它）。同时 `base.py` 里落了 `Embedder` Protocol 与两个后端共用的那一半（前缀拼接、分批、截断→归一化→复核），两个后端各自只剩 `_forward()`。`batching.py` 仍然是 `F5-02` 的。同一条改动还改了 §4.5 的 `[embed]` 模板三项（`batch_size` 16→8、新增 `max_seq` 与 `threads`），理由逐项写在模板注释里，读数见 `PROGRESS.md` §3。
 
 
 ### 4.4 数据库 schema
@@ -528,7 +530,10 @@ model_id    = "google/embeddinggemma-2"
 dim         = 768                       # 已选原生维（D5）；可设 512/256/128，改动后需 reindex --stale
 dtype       = "float32"                 # 严禁 float16
 quantize    = "int8"                    # 向量落盘量化: none|int8
-batch_size  = 16
+batch_size  = 8                         # F5-01 实测改：批 8 = 553.0 tok/s / 常驻 2.64 GiB；
+                                        # 原写的 16 = 442.8 tok/s / 4.88 GiB（更慢且多占 2.2 GiB）
+max_seq     = 2048                      # F5-01 新增；不写这一项时真实默认值是 1e36（即永不截断）
+threads     = 8                         # F5-01 新增；本机物理核数。与 [perf] workers 相乘
 
 [index]
 vector_backend = "faiss"                # faiss | hnswlib
