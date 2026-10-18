@@ -96,7 +96,8 @@ def test_each_vector_finds_itself_first(tmp_path: Path, quantize: str) -> None:
     """建一个小索引，每条向量拿自己去查，**第一名必须是它自己的 label**。
 
     这是 HNSW 最起码的正确性：`IndexIDMap2` 的 label 映射、`add_with_ids` 与 `search` 的
-    返回顺序任何一处错位，这条就会先红。int8 的自我分数可以略超 1（`E43` 实测过 1.0039），
+    返回顺序任何一处错位，这条就会先红。int8 的自我分数可以略超 1（`E43` 在项目参数下
+    最大自查分数是 1.00074，见 `docs/PROGRESS.md` 的 E43 行；早先写过的 1.0039 没有复现），
     所以这里只断言排名，不断言分数。
     """
     index = VectorIndex.open(tmp_path / INDEX_FILENAME, spec(quantize))
