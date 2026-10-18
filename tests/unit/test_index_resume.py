@@ -25,9 +25,11 @@ r"""`F4-04`：`index/build.py` 的编排（批量、提交、断点续跑）与 
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from localsearch.cli.main import main
@@ -42,6 +44,7 @@ from localsearch.core.config import (
 from localsearch.core.logging import reset_logging
 from localsearch.core.models import ExtractedDoc
 from localsearch.embed.base import EmbedUnavailable
+from localsearch.embed.batching import BatchResult
 from localsearch.core.registry import Registry
 from localsearch.extract import ExtractConfig, Extractor
 from localsearch.index.build import (
@@ -56,6 +59,7 @@ from localsearch.index.build import (
 from localsearch.index.sqlite_store import SqliteStore, store_path
 from localsearch.ingest.base import ScanConfig, make_scanner
 from localsearch.ingest.filters import IgnoreRules
+from pool_fakes import vector_for
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 DEFAULT_CHUNK = ChunkCfg()
@@ -560,6 +564,103 @@ def test_resume_skips_tier0_and_finishes_what_is_left(
     assert len(second.calls) == 1, f"已完成的文件被重做了：{second.calls}"
     assert store.count_files(status="fulltext") == 3
     assert not result.has_failures
+
+
+class SpyPool:
+    """替换 `EmbedPool` 的桩：记下每一次构造，以及喂进来的每一条文本。
+
+    `A9` 的判据是"第二趟没有嵌入任何东西、也没有起过嵌入进程"，而这两件事只能从
+    `build.py` 的外面看（缓存命中之后 `plan.todo` 为空，`EmbedPool` 根本不该被构造）。
+    向量用 `vector_for()` 算、再归一化——`VectorIndex.add()` 对非单位向量会拒收。
+    """
+
+    constructed: list[int] = []
+    texts: list[str] = []
+
+    def __init__(self, cfg, *, workers: int = 0) -> None:
+        self.dim = cfg.dim
+        self.workers = 1
+        self.notes: list[str] = []
+        self.observed_peak_bytes = None
+        SpyPool.constructed.append(cfg.dim)
+
+    def embed_documents(self, requests):
+        for request in requests:
+            SpyPool.texts.extend(request.texts)
+            vectors = np.stack([vector_for(text, self.dim) for text in request.texts])
+            vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+            yield BatchResult(index=request.index, vectors=vectors, worker_pid=os.getpid())
+
+    def close(self) -> None:
+        pass
+
+
+def reset_to_fulltext(store: SqliteStore, path: str) -> None:
+    """把一个文件退回"正文做完、语义没做"的状态，但**保留**它的 `content_hash` / `blob_id`。
+
+    `set_file_extracted()` 的 UPDATE 会把没传的两列写成 NULL，那样切片就与 blob 断了，
+    第二趟的 Tier2 会去找一个不存在的正文——所以这两列要先读回来、原样再写进去。
+    """
+    row = store.get_file(path)
+    assert row is not None
+    store.set_file_extracted(
+        path,
+        status="fulltext",
+        tier=1,
+        content_hash=row.content_hash,
+        blob_id=row.blob_id,
+    )
+    store.commit()
+
+
+def test_a9_second_semantic_pass_embeds_nothing_and_builds_no_pool(
+    tmp_path: Path, store: SqliteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`A9` 在语义这一级的落点：**同一份内容只嵌一次**。
+
+    造法：两个文件、同一段正文（它们共用一个 blob），跑一趟 Tier2 之后把两行退回
+    `fulltext` / tier 1——让 Tier2 **重新选中它们**，而不是因为没有东西可选才"什么都没
+    做"。第二趟必须：`embedded == 0`、`cached` 等于切片数、`SpyPool` 一次都没有被构造、
+    喂给嵌入器的文本没有新增。少这任何一条，都只是"这一趟碰巧没干活"，不是"缓存生效了"。
+    """
+    body = "同一份内容 语义 缓存"
+    tree = make_tree(tmp_path, **{"a.zzz": body, "b.zzz": body})
+    data = tmp_path / "data"
+    config = config_for(tree, data)
+    index_path = tmp_path / "hnsw.index"
+    scanner = make_scanner(scan_config_for(tree, data))
+    rules = IgnoreRules.empty(roots=(str(tree),))
+    SpyPool.constructed = []
+    SpyPool.texts = []
+    monkeypatch.setattr("localsearch.index.build.EmbedPool", SpyPool)
+
+    def go(**extra):
+        return run(
+            store,
+            scanner=scanner,
+            rules=rules,
+            config=config,
+            target_tier=2,
+            index_path=index_path,
+            registry=registry_with(CountingExtractor(text=body)),
+            extract_config=ExtractConfig(),
+            **extra,
+        )
+
+    first = go()
+    assert first.tier2 is not None and first.tier2.embedded >= 1
+    assert len(SpyPool.constructed) == 1, "第一趟要起一个嵌入进程"
+    texts_after_first = list(SpyPool.texts)
+
+    for rel in ("a.zzz", "b.zzz"):
+        reset_to_fulltext(store, as_store_path(str(tree), rel))
+
+    second = go(resume=True)
+    assert second.tier2 is not None
+    assert second.tier2.embedded == 0, f"第二趟又嵌了：{second.tier2}"
+    assert second.tier2.cached >= 1, "缓存没命中，等于没测到 A9"
+    assert len(SpyPool.constructed) == 1, "第二趟不该再起嵌入进程"
+    assert SpyPool.texts == texts_after_first, "第二趟不该再喂文本给嵌入器"
 
 
 def test_resume_on_a_store_with_nothing_to_do(tmp_path: Path, store: SqliteStore) -> None:

@@ -847,6 +847,11 @@ def run_tier2(
 
             dirty = False
             pieces: list[ChunkText] = []
+            # 一批之内同一份正文只取一次、只带进 `pieces` 一次。两条路径共用一个 blob
+            # （`D12` 的去重）时，它们的切片是**同一批行**；各带一遍的话，同一个
+            # `chunk_id` 会在一次 `set_chunk_vectors()` 里出现两次——当场 `StoreError`，
+            # 整趟回滚，而那是一个在真实盘上一定会遇到的形状。
+            chunks_by_blob: dict[int, Sequence[ChunkText]] = {}
             for row in batch:
                 stats.work += 1
                 if row.blob_id is None:
@@ -857,11 +862,14 @@ def run_tier2(
                     stats.no_blob += 1
                     stats.files_indexed += 1
                     continue
-                blob_chunks = store.chunks_for_blobs((row.blob_id,)).get(row.blob_id, ())
-                if blob_chunks:
+                blob_chunks = chunks_by_blob.get(row.blob_id)
+                if blob_chunks is None:
+                    blob_chunks = store.chunks_for_blobs((row.blob_id,)).get(row.blob_id, ())
+                    chunks_by_blob[row.blob_id] = blob_chunks
                     pieces.extend(blob_chunks)
-                else:
+                if not blob_chunks:
                     # 0 字节文件 / 正文为空：没有文本就没有向量，这一级对它是**空真**。
+                    # 每条路径各记一笔（与 `files` 的行数对得上），不因共用 blob 而合并。
                     stats.empty += 1
                 store.set_file_indexed(row.path)
                 stats.files_indexed += 1
