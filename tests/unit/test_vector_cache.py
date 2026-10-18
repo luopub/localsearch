@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 
 from localsearch.core.config import EmbedCfg
+from localsearch.core.models import Chunk
 from localsearch.embed.base import TaskPrefixes
 from localsearch.index.sqlite_store import (
     _SQL_PARAM_LIMIT,
@@ -391,6 +392,30 @@ def test_count_vectors_by_version_and_total() -> None:
     assert store.count_vectors(embed_ver=OTHER_VER) == 1
     assert store.count_vectors() == 3
     assert store.count_vectors(embed_ver="embed:9|别的") == 0
+
+
+def test_count_chunk_vectors_by_version_and_total() -> None:
+    """`count_chunk_vectors()` 数的是**切片**（`chunks.vec_label` 非空），同样要按版本筛。
+
+    一个 blob 两片：第一片记在 `VER` 下、第二片记在 `OTHER_VER` 下。按版本只能看到自己那一片，
+    全数是两片——漏掉版本条件时，`embed_ver=VER` 那一行会得到 2 而不是 1。
+    """
+    store = SqliteStore.in_memory()
+    blob = store.put_blob(content_hash="c-vec", size_bytes=4, extractor="t", parser_ver="p", now=1).blob_id
+    store.put_chunks(
+        blob,
+        [
+            Chunk(ord=0, text="甲", char_start=0, char_end=1, n_tokens=1),
+            Chunk(ord=1, text="乙", char_start=1, char_end=2, n_tokens=1),
+        ],
+    )
+    first, second = (c.chunk_id for c in store.chunks_for_blobs((blob,))[blob])
+    store.set_chunk_vectors([(first, 1)], embed_ver=VER)
+    store.set_chunk_vectors([(second, 2)], embed_ver=OTHER_VER)
+    assert store.count_chunk_vectors(embed_ver=VER) == 1
+    assert store.count_chunk_vectors(embed_ver=OTHER_VER) == 1
+    assert store.count_chunk_vectors() == 2
+    assert store.count_chunk_vectors(embed_ver="embed:9|别的") == 0
 
 
 def test_delete_vectors_only_touches_one_version() -> None:

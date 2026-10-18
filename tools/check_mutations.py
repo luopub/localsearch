@@ -1981,10 +1981,22 @@ MUTATIONS: list[dict[str, object]] = [
     },
     {
         "id": "f5-03",
-        "label": "`count_vectors()` 不再按版本筛",
+        "label": "`count_chunk_vectors()` 不再按版本筛",
         "file": "src/localsearch/index/sqlite_store.py",
         "old": '        if embed_ver is None:\n            row = self._conn.execute(\n                "SELECT count(*) FROM chunks WHERE vec_label IS NOT NULL"',
         "new": '        if True:\n            row = self._conn.execute(\n                "SELECT count(*) FROM chunks WHERE vec_label IS NOT NULL"',
+        "tests": ["tests/unit/test_vector_cache.py"],
+        "expect": "test_count_chunk_vectors_by_version_and_total",
+        "why": "这个数会进 `doctor` / `status` 的报表，是“这一版缓存有多大”的唯一出处。"
+               "混进别的版本之后，报表上缓存看着有几百万条，而实际上**这一版能用的一条"
+               "都没有**——下一步（`F5-04` 判断“要不要重嵌”）就会被它带偏",
+    },
+    {
+        "id": "f5-03",
+        "label": "`count_vectors()` 不再按版本筛",
+        "file": "src/localsearch/index/sqlite_store.py",
+        "old": '        if embed_ver is None:\n            row = self._conn.execute("SELECT count(*) FROM embed_cache").fetchone()',
+        "new": '        if True:\n            row = self._conn.execute("SELECT count(*) FROM embed_cache").fetchone()',
         "tests": ["tests/unit/test_vector_cache.py"],
         "expect": "test_count_vectors_by_version_and_total",
         "why": "这个数会进 `doctor` / `status` 的报表，是“这一版缓存有多大”的唯一出处。"
