@@ -904,10 +904,10 @@ MUTATIONS: list[dict[str, object]] = [
         "id": "f4-03",
         "label": "命令行明确要的语义检索被悄悄换成词法",
         "file": "src/localsearch/search/tier.py",
-        "old": "        if explicit:\n            raise ModeUnavailable(requested, IMPLEMENTED_MODES)\n",
-        "new": "",
+        "old": "        if explicit:\n",
+        "new": "        if False:\n",
         "tests": ["tests/unit/test_tier_state.py"],
-        "expect": "test_a_named_semantic_mode_is_refused_rather_than_silently_downgraded",
+        "expect": "test_a_named_semantic_mode_is_refused_when_no_vector_exists",
         "why": "`A8` 里「不允许静默」那半句最要紧的一格：一个人要的是「意思相近」，"
                "而词法检索会给出一堆**看起来合理**的关键词命中——他没有任何办法"
                "察觉自己拿到的是另一种东西",
