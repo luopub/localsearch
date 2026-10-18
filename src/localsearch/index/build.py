@@ -968,8 +968,12 @@ def _embed_todo(
     text_of: dict[str, str] = {}
     for key, piece in zip(keys, pieces, strict=True):
         text_of.setdefault(key, piece.text)
+    # ⚠ `todo` 里装的是**缓存键**（`blake2b-128:…` 摘要），不是正文。喂给嵌入器的必须是
+    # `text_of[key]`：否则模型嵌入的是一串哈希，每一片切片都得到一个毫无意义的向量，
+    # 而所有断言"有向量、数量对"的测试都还是绿的。
+    texts = [text_of[key] for key in todo]
     vectors = np.zeros((len(todo), dim), dtype=np.float32)
-    for result in pool.embed_documents(iter_requests(list(todo), size=batch_size)):
+    for result in pool.embed_documents(iter_requests(texts, size=batch_size)):
         start = result.index * batch_size
         vectors[start : start + len(result.vectors)] = result.vectors
     return vectors

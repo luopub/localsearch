@@ -661,6 +661,11 @@ def test_a9_second_semantic_pass_embeds_nothing_and_builds_no_pool(
     assert second.tier2.cached >= 1, "缓存没命中，等于没测到 A9"
     assert len(SpyPool.constructed) == 1, "第二趟不该再起嵌入进程"
     assert SpyPool.texts == texts_after_first, "第二趟不该再喂文本给嵌入器"
+    # 回归：`_embed_todo` 曾把缓存键（`blake2b-128:…` 摘要）当正文喂给嵌入器——每一片
+    # 切片都得到一个哈希的向量，而计数类断言全是绿的。这里钉的是**喂进去的是正文**。
+    assert texts_after_first, "第一趟必须真的嵌入了东西"
+    assert all(not t.startswith("blake2b") for t in texts_after_first), texts_after_first
+    assert any(body in t for t in texts_after_first), texts_after_first
 
 
 def test_resume_on_a_store_with_nothing_to_do(tmp_path: Path, store: SqliteStore) -> None:

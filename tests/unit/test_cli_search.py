@@ -392,3 +392,159 @@ def test_filter_options_are_not_declared_rather_than_silently_ignored(
         code, out, err = cli(sandbox, capsys, *argv)
         assert code == 2, argv
         assert "No such option" in flat(out + " " + err), argv
+
+
+# ==============================================================================
+# 5. 语义那一路的命令面（P5 · F5-04）
+# ==============================================================================
+#
+# 下面三条钉的是 `_search_semantic()` 的**接线**：成功路径会打印「按意思」一段；嵌入器
+# 不可用 → 退出码 2；向量索引文件不在 → 退出码 2。判据本身（相似度排序、孤儿丢弃、空查询
+# 不嵌）在 `test_vectors.py` 里。这里用的嵌入是**确定的假货**——真模型不进测试。
+
+import numpy as np  # noqa: E402
+
+from localsearch.embed.base import EmbedUnavailable  # noqa: E402
+from localsearch.embed.batching import BatchResult  # noqa: E402
+from localsearch.index.vectors_faiss import INDEX_FILENAME  # noqa: E402
+from pool_fakes import vector_for  # noqa: E402
+
+
+def _canon(text: str) -> str:
+    """把"这段话在说的那个词"映射成同一个键。
+
+    jieba 会把正文切成「成本 核算」（见上文 `BODY_WORD` 的注释），于是切片里的字符串
+    **不等于** `BODY_WORD`，直接比子串会漏掉它。两侧都经过这一步，才能让"含这个词的切片"
+    与"查这个词"落在同一个向量上。
+    """
+    if "成本" in text and "核算" in text:
+        return BODY_WORD
+    return text
+
+
+class _StubPool:
+    """替换 `EmbedPool`：含查询词的那一片，向量取**查询词本身**的向量。
+
+    文档侧嵌的是加了前缀的整串（`title: none | text: …`），查询侧嵌的是裸词，两者
+    逐位不会相等——这里不去模拟前缀，而是让"含 `BODY_WORD` 的切片"与"`BODY_WORD` 的
+    查询"落在同一个向量上。于是那一片的相似度是 1.000，其余片是接近 0 的随机数，
+    断言的就是**接线**（那一片排第一、带着 1.000 被打印出来），不是模型的语义。
+    """
+
+    def __init__(self, cfg, *, workers: int = 0) -> None:
+        self.dim = cfg.dim
+        self.workers = 1
+        self.notes: list[str] = []
+        self.observed_peak_bytes = None
+
+    def embed_documents(self, requests):
+        for request in requests:
+            vectors = np.stack([vector_for(_canon(t), self.dim) for t in request.texts])
+            vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+            yield BatchResult(index=request.index, vectors=vectors, worker_pid=0)
+
+    def close(self) -> None:
+        pass
+
+
+class _StubQueryEmbedder:
+    """替换 `create_embedder()`：`encode_queries()` 对同一个文本给出与文档侧一致的向量。"""
+
+    def __init__(self, dim: int) -> None:
+        self.dim = dim
+
+    def encode_queries(self, texts):
+        vectors = np.stack([vector_for(_canon(t), self.dim) for t in texts])
+        return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    def close(self) -> None:
+        pass
+
+
+def _semantic_on(sandbox: dict[str, Path]) -> None:
+    text = sandbox["cfg"].read_text(encoding="utf-8")
+    sandbox["cfg"].write_text(text.replace("semantic = false", "semantic = true"), encoding="utf-8")
+
+
+@pytest.fixture
+def stub_semantic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """建索引时用 `_StubPool`，查询时用 `_StubQueryEmbedder`（维度跟配置一致）。"""
+    monkeypatch.setattr("localsearch.index.build.EmbedPool", _StubPool)
+    monkeypatch.setattr(
+        "localsearch.cli.commands.search.create_embedder",
+        lambda cfg, **_kw: _StubQueryEmbedder(cfg.dim),
+    )
+
+
+def _vector_index_path(sandbox: dict[str, Path]) -> Path:
+    return sandbox["data_dir"] / "index" / INDEX_FILENAME
+
+
+def test_a_semantic_search_prints_the_by_meaning_section(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], stub_semantic: None
+) -> None:
+    """成功路径：建好向量之后，`--mode semantic` 打印「按意思」一段，并且**命中那一片**。
+
+    造法：`index --tier 2` 把正文那一片嵌进向量索引；查询词就是那段正文里的词，
+    `_StubQueryEmbedder` 给出的向量与文档侧逐位相同，所以它的相似度必须是 1.000。
+    断言的是输出里出现「按意思」与一个相似度 1.000——不是"没报错"。
+    """
+    _semantic_on(sandbox)
+    code, out, err = cli(sandbox, capsys, "index", "--tier", "2")
+    assert code == 0, flat(out + err)
+    assert _vector_index_path(sandbox).exists(), "向量索引文件应该已经落盘"
+
+    code, out, err = cli(sandbox, capsys, "search", BODY_WORD, "--mode", "semantic")
+    text = flat(out + " " + err)
+    assert code == 0, text
+    assert "按意思" in text, text
+    # 量化是 int8，分数是近似的（`VectorHit` 文档），所以不断言 1.000，只断言"排第一、
+    # 分数够高"。那一片必须排在别的前面——排序错了的接线也会"打印出来"。
+    assert "相似度 0.99" in text, f"含查询词的那一片应该得高分：{text}"
+    assert text.index("report-2024") < text.index("report-2025"), text
+    assert "Traceback" not in text
+
+
+def test_an_unavailable_embedder_at_query_time_is_a_usage_error(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], stub_semantic: None, monkeypatch
+) -> None:
+    """嵌入器在查询时不可用（模型缺失之类）→ 退出码 2，并点名「嵌入模型不可用」。
+
+    索引在，台账也说语义就绪，只有嵌入器起不来——这是 `_search_semantic` 里第二个
+    `except` 的唯一入口。不接住的话，用户看到的是一条 traceback 而不是一句用法说明。
+    """
+    _semantic_on(sandbox)
+    code, _, err = cli(sandbox, capsys, "index", "--tier", "2")
+    assert code == 0, flat(err)
+
+    def refuse(cfg, **_kw):
+        raise EmbedUnavailable("测试桩：模型不在本机")
+
+    monkeypatch.setattr("localsearch.cli.commands.search.create_embedder", refuse)
+    code, out, err = cli(sandbox, capsys, "search", BODY_WORD, "--mode", "semantic")
+    text = flat(out + " " + err)
+    assert code == 2, text
+    assert "嵌入模型不可用" in text, text
+    assert "Traceback" not in text
+    assert "按意思" not in text, "拒绝的那条路不该打印任何检索结果"
+
+
+def test_a_missing_vector_index_file_is_a_usage_error(
+    sandbox: dict[str, Path], capsys: pytest.CaptureFixture[str], stub_semantic: None
+) -> None:
+    """台账说语义就绪、但向量索引文件被删了 → 退出码 2，不新建一个空索引糊弄过去。
+
+    `VectorIndex.load()` 的全部意义就在这里：查询路径只读、从不创建（创建是 `index` 的事）。
+    若这里改成 `open()`，一个被误删的索引会被悄悄换成空的，搜索返回"什么都没有"，
+    而台账仍然说"语义就绪"。
+    """
+    _semantic_on(sandbox)
+    code, _, err = cli(sandbox, capsys, "index", "--tier", "2")
+    assert code == 0, flat(err)
+    _vector_index_path(sandbox).unlink()
+
+    code, out, err = cli(sandbox, capsys, "search", BODY_WORD, "--mode", "semantic")
+    text = flat(out + " " + err)
+    assert code == 2, text
+    assert not _vector_index_path(sandbox).exists(), "查询路径不许把索引文件创建回来"
+    assert "Traceback" not in text
