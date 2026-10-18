@@ -989,3 +989,41 @@ def test_disabling_dedup_is_refused_rather_than_ignored(
     err = capsys.readouterr().err
     assert code == 2 and "dedup_by_content" in flat(err)
     assert not data_dir.exists()
+
+
+class _BoomPool(SpyPool):
+    """第一次嵌入就抛异常：模拟一批在嵌入途中出错（不是环境问题，是普通的 `EmbedError`）。"""
+
+    def embed_documents(self, requests):
+        raise RuntimeError("测试桩：嵌入途中出错")
+        yield  # pragma: no cover - 让它是生成器
+
+
+def test_a_failed_tier2_batch_leaves_no_indexed_file_without_vectors(
+    tmp_path: Path, store: SqliteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tier2 一批在嵌入途中失败 → 回滚，**没有**一行是 `indexed` 却没有向量。
+
+    `set_file_indexed()` 排在嵌入之前（它是 `files` 的写），所以如果不回滚，那一批的
+    文件会留下 `indexed / tier 2` 而 `chunks.vec_label` 全是 NULL——下一趟 Tier2 不会再
+    挑它们，搜索却报"语义就绪"。`run_tier2` 的外层 `except BaseException: store.rollback()`
+    就是为这一条存在的。
+    """
+    body = "回滚 语义 检查"
+    tree = make_tree(tmp_path, **{"a.zzz": body, "b.zzz": body})
+    data = tmp_path / "data"
+    monkeypatch.setattr("localsearch.index.build.EmbedPool", _BoomPool)
+
+    with pytest.raises(RuntimeError, match="嵌入途中出错"):
+        run(
+            store,
+            scanner=make_scanner(scan_config_for(tree, data)),
+            rules=IgnoreRules.empty(roots=(str(tree),)),
+            config=config_for(tree, data),
+            target_tier=2,
+            index_path=tmp_path / "hnsw.index",
+            registry=registry_with(CountingExtractor(text=body)),
+            extract_config=ExtractConfig(),
+        )
+
+    assert store.count_files(status="indexed") == 0, "失败的那一批不许留下 indexed 行"

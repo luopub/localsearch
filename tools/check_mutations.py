@@ -2029,6 +2029,42 @@ MUTATIONS: list[dict[str, object]] = [
                "没做。不拦就只剩 `OR IGNORE` 那一道（它挡得住覆盖，挡不住两个 label "
                "都进了 HNSW）",
     },
+    {
+        "id": "f5-04",
+        "label": "Tier2 把缓存键（摘要）而不是正文喂给嵌入器",
+        "file": "src/localsearch/index/build.py",
+        "old": "    texts = [text_of[key] for key in todo]",
+        "new": "    texts = list(todo)",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_a9_second_semantic_pass_embeds_nothing_and_builds_no_pool",
+        "why": "`todo` 装的是缓存键。直接喂进去，嵌入器嵌的是 `blake2b-128:…` 这串哈希，"
+               "每一片切片都得到一个毫无意义的向量，而计数类断言全是绿的。A9 的回归断言"
+               "钉的就是\"喂进去的是正文\"。",
+    },
+    {
+        "id": "f5-04",
+        "label": "同一批共用 blob 时不去重（切片重复带入）",
+        "file": "src/localsearch/index/build.py",
+        "old": "                blob_chunks = chunks_by_blob.get(row.blob_id)",
+        "new": "                blob_chunks = None",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_a9_second_semantic_pass_embeds_nothing_and_builds_no_pool",
+        "why": "两条路径共用一个 blob（D12）时，同一批行被带进 pieces 两次，"
+               "`set_chunk_vectors()` 当场抛 `StoreError`（同一次调用里 chunk_id 重复），"
+               "整趟回滚。A9 用两个同正文文件造出这个形状。",
+    },
+    {
+        "id": "f5-04",
+        "label": "Tier2 批次失败时不回滚（留下 indexed 却无向量的行）",
+        "file": "src/localsearch/index/build.py",
+        "old": "        store.rollback()\n        raise",
+        "new": "        pass\n        raise",
+        "tests": ["tests/unit/test_index_resume.py"],
+        "expect": "test_a_failed_tier2_batch_leaves_no_indexed_file_without_vectors",
+        "why": "`set_file_indexed()` 排在嵌入之前。不回滚的话，失败那一批的文件留下 "
+               "`indexed / tier 2` 而 `chunks.vec_label` 全 NULL：下一趟 Tier2 不再挑它们，"
+               "搜索却报语义就绪。",
+    },
 ]
 
 
